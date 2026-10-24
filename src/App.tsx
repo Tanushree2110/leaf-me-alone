@@ -6,13 +6,11 @@ import {
   ChevronDown,
   ChevronUp,
   ClipboardList,
-  ExternalLink,
   EyeOff,
   FastForward,
   GitBranch,
   Layers,
   Leaf,
-  Lock,
   Play,
   Plus,
   RotateCcw,
@@ -51,32 +49,40 @@ import { AllowedTabsManager } from './components/AllowedTabsManager'
 type ExpandablePanel = 'tabs' | 'upgrades' | 'simulator' | 'log' | null
 
 function generateProceduralVineSegments(): VineSegment[] {
+  // 15 points = 14 climbing segments winding up the windowpane and arching across the top
   const points = [
     { x: 106, y: 342 },
-    { x: 96, y: 298 },
-    { x: 132, y: 256 },
-    { x: 112, y: 210 },
-    { x: 158, y: 174 },
-    { x: 136, y: 128 },
-    { x: 184, y: 92 },
-    { x: 222, y: 68 },
+    { x: 94, y: 312 },
+    { x: 122, y: 284 },
+    { x: 98, y: 254 },
+    { x: 134, y: 226 },
+    { x: 112, y: 196 },
+    { x: 148, y: 168 },
+    { x: 126, y: 138 },
+    { x: 164, y: 112 },
+    { x: 148, y: 86 },
+    { x: 188, y: 72 },
+    { x: 224, y: 84 },
+    { x: 258, y: 68 },
+    { x: 292, y: 82 },
+    { x: 318, y: 64 },
   ]
   const segments: VineSegment[] = []
   for (let i = 0; i < points.length - 1; i++) {
     const p0 = points[i]
     const p1 = points[i + 1]
     const midY = (p0.y + p1.y) / 2
-    const sway = i % 2 === 0 ? -22 : 22
+    const sway = i % 2 === 0 ? -16 : 16
     segments.push({
       x0: p0.x,
       y0: p0.y,
       cp1x: p0.x + sway,
-      cp1y: midY + 10,
+      cp1y: midY + 6,
       cp2x: p1.x - sway * 0.6,
-      cp2y: midY - 10,
+      cp2y: midY - 6,
       x1: p1.x,
       y1: p1.y,
-      thickness: Math.max(2.2, 6.2 - i * 0.6),
+      thickness: Math.max(2.4, 6.2 - i * 0.26),
     })
   }
   return segments
@@ -95,12 +101,12 @@ function createInitialLeaves(segments: VineSegment[]): LeafNode[] {
       id: i + 1,
       segmentIndex: segIdx,
       side,
-      size: 13 + (i % 3) * 2.5,
+      size: 15 + (i % 3) * 2,
       baseAngle: side * (0.55 + (i % 2) * 0.25),
       health: 1,
       status: 'attached',
       hasBlossom: i % 2 === 1,
-      blossomScale: 1,
+      blossomScale: 1.05,
       blossomColor: BLOSSOM_COLORS[i % BLOSSOM_COLORS.length],
       x: seg.x1,
       y: seg.y1,
@@ -128,11 +134,12 @@ export function App() {
   const [focusMode, setFocusMode] = useState<FocusMode>('locked_in')
   const [roommateState, setRoommateState] = useState<RoommateState>('typing')
   const [leaves, setLeaves] = useState<LeafNode[]>(() => createInitialLeaves(vineSegments))
-  const [vineGrowthProgress, setVineGrowthProgress] = useState<number>(0.78)
+  const [vineGrowthProgress, setVineGrowthProgress] = useState<number>(0.45)
+  const [nextLeafProgress, setNextLeafProgress] = useState<number>(0.25)
   const [upgrades, setUpgrades] = useState<RoomUpgrade[]>(INITIAL_UPGRADES)
   const [daysSinceDoomscroll, setDaysSinceDoomscroll] = useState<number>(4)
   const [dialogueText, setDialogueText] = useState<string>(
-    'Headphones on. Eyes on screen, only whitelisted tabs open. Look at that vine reach for the sun!'
+    'Headphones on. Eyes on screen (or glancing at keyboard to type)—watch the ivy vine grow!'
   )
 
   // Expandable UI Drawers & Modals (Zero-scroll single-screen layout)
@@ -140,7 +147,7 @@ export function App() {
   const [isPolaroidOpen, setIsPolaroidOpen] = useState<boolean>(false)
   const [isWebcamExpanded, setIsWebcamExpanded] = useState<boolean>(true)
 
-  // Webcam Guard State (ON by default as requested!)
+  // Webcam Guard State
   const [webcamEnabled, setWebcamEnabled] = useState<boolean>(true)
   const [cameraStatus, setCameraStatus] = useState<CameraStatus>('initializing')
 
@@ -175,7 +182,7 @@ export function App() {
         second: '2-digit',
       }),
       type: 'focus',
-      message: 'Session started. Specify your initial Allowed Tabs and keep Webcam Guard active!',
+      message: 'Session started. Looking at screen or typing on keyboard grows a new leaf every ~7s!',
       quote: 'Chlorophyll levels optimal. Approved workspace tabs only.',
     },
   ])
@@ -202,7 +209,70 @@ export function App() {
     setActivePanel((prev) => (prev === panel ? null : panel))
   }
 
-  // Trigger a distraction event (unapproved tab switch, phone glance, or drifting away from camera)
+  // Helper to sprout one new healthy emerald leaf on the next available vine node
+  const sproutOneLeaf = useCallback(() => {
+    setLeaves((prev) => {
+      // First heal all currently attached/dying leaves toward 1.0 health
+      const healed = prev.map((l) =>
+        l.status === 'attached' || l.status === 'dying'
+          ? {
+              ...l,
+              status: 'attached' as const,
+              health: Math.min(1, l.health + 0.35),
+              hasBlossom: true,
+            }
+          : l
+      )
+
+      const attached = healed.filter((l) => l.status === 'attached')
+      if (attached.length >= vineSegments.length) {
+        return healed
+      }
+
+      // Find the lowest segmentIndex (0..13) that doesn't currently have an attached leaf
+      const occupiedIndices = new Set(attached.map((l) => l.segmentIndex))
+      let targetSegIdx = 0
+      for (let i = 0; i < vineSegments.length; i++) {
+        if (!occupiedIndices.has(i)) {
+          targetSegIdx = i
+          break
+        }
+      }
+
+      const seg = vineSegments[targetSegIdx]
+      const newId = healed.length + 1
+      const side: -1 | 1 = targetSegIdx % 2 === 0 ? -1 : 1
+      const newLeaf: LeafNode = {
+        id: newId,
+        segmentIndex: targetSegIdx,
+        side,
+        size: 15 + (targetSegIdx % 3) * 2,
+        baseAngle: side * (0.5 + (targetSegIdx % 2) * 0.25),
+        health: 1,
+        status: 'attached',
+        hasBlossom: true,
+        blossomScale: 1.1,
+        blossomColor: BLOSSOM_COLORS[newId % BLOSSOM_COLORS.length],
+        x: seg.x1,
+        y: seg.y1,
+        vx: 0,
+        vy: 0,
+        rotation: 0,
+        vRot: 0,
+        swayPhase: Math.random() * Math.PI * 2,
+        seed: newId * 2.17,
+      }
+
+      const nextCount = attached.length + 1
+      setVineGrowthProgress(Math.min(1, Math.max(0.2, (nextCount + 0.5) / vineSegments.length)))
+
+      return [...healed, newLeaf]
+    })
+
+    setStats((s) => ({ ...s, leavesGrown: s.leavesGrown + 1 }))
+  }, [vineSegments])
+
+  // Trigger a distraction event
   const triggerDistraction = useCallback(
     (
       reason = 'Opened an unapproved tab',
@@ -210,12 +280,15 @@ export function App() {
       logType: ActivityLogItem['type'] = 'distraction'
     ) => {
       setDaysSinceDoomscroll(0)
+      setNextLeafProgress(0)
 
       setLeaves((prevLeaves) => {
         const attached = prevLeaves.filter((l) => l.status === 'attached' || l.status === 'dying')
         if (attached.length === 0) return prevLeaves
 
-        const victim = attached[attached.length - 1]
+        // Pick the highest segmentIndex attached leaf to wither and fall
+        const sorted = [...attached].sort((a, b) => b.segmentIndex - a.segmentIndex)
+        const victim = sorted[0]
         const seg = vineSegments[Math.min(victim.segmentIndex, vineSegments.length - 1)]
         const remainingAfterDrop = attached.length - 1
 
@@ -233,7 +306,7 @@ export function App() {
             }
           }
           if (leaf.status === 'attached') {
-            return { ...leaf, health: Math.max(0.45, leaf.health - 0.12) }
+            return { ...leaf, health: Math.max(0.5, leaf.health - 0.1) }
           }
           return leaf
         })
@@ -289,10 +362,9 @@ export function App() {
     [appendLog, vineSegments]
   )
 
-  // Switch to an Allowed Whitelisted Tab (Grants a safe authorized switch pass so visibilitychange doesn't punish you!)
   const handleSwitchToAllowedTab = (tab: AllowedTab) => {
     setActiveAllowedTabId(tab.id)
-    authorizedSwitchUntilRef.current = Date.now() + 20000 // 20s safe window to switch to that browser tab
+    authorizedSwitchUntilRef.current = Date.now() + 20000
     setAuthorizedPassSecondsLeft(20)
 
     setStats((prev) => ({
@@ -313,7 +385,6 @@ export function App() {
     }
   }
 
-  // Countdown for Authorized Tab Switch Pass
   useEffect(() => {
     if (authorizedPassSecondsLeft <= 0) return
     const timer = setInterval(() => {
@@ -323,12 +394,10 @@ export function App() {
     return () => clearInterval(timer)
   }, [authorizedPassSecondsLeft])
 
-  // Real browser `visibilitychange` listener: checks if the tab switch was authorized via the Whitelist!
   useEffect(() => {
     const handleVisibility = () => {
       if (document.hidden) {
         if (Date.now() <= authorizedSwitchUntilRef.current) {
-          // User switched to a whitelisted tab! No penalty!
           return
         }
         triggerDistraction(
@@ -340,10 +409,9 @@ export function App() {
     return () => document.removeEventListener('visibilitychange', handleVisibility)
   }, [triggerDistraction])
 
-  // Webcam Guard Callbacks
   const handlePhoneDetected = useCallback(() => {
     triggerDistraction(
-      'Webcam Guard: Caught looking down at phone!',
+      'Webcam Guard: Stared down below horizon >6.5s (Phone Doomscroll)!',
       PHONE_DETECTED_QUOTES,
       'camera'
     )
@@ -361,19 +429,13 @@ export function App() {
     if (focusMode === 'distracted') {
       setFocusMode('locked_in')
       setRoommateState('typing')
-      setDialogueText('Eyes back on screen! Putting the clipboard away and resuming deep work.')
+      setDialogueText('Eyes on screen / typing! Putting the clipboard away and regrowing the vine.')
     }
   }, [focusMode])
 
-  // Allowed Tabs Management Callbacks
   const handleAddInitialTab = (title: string, url: string) => {
     if (isWhitelistLocked) return
-    const newTab: AllowedTab = {
-      id: `tab-${Date.now()}`,
-      title,
-      url,
-    }
-    setAllowedTabs((prev) => [...prev, newTab])
+    setAllowedTabs((prev) => [...prev, { id: `tab-${Date.now()}`, title, url }])
   }
 
   const handleRemoveInitialTab = (id: string) => {
@@ -400,7 +462,7 @@ export function App() {
     )
   }
 
-  // Physics loop for falling leaves landing on the studio floor
+  // Falling leaf physics loop
   useEffect(() => {
     const floorLevel = 392
     const interval = setInterval(() => {
@@ -439,9 +501,39 @@ export function App() {
     return () => clearInterval(interval)
   }, [])
 
-  // Main 1-second Focus & O. Henry Redemption Progression Loop
+  // Main 1-second Focus, Leaf Sprouting & O. Henry Redemption Progression Loop
   useEffect(() => {
     const timer = setInterval(() => {
+      // Only grow when user isn't actively flagged for phone/away
+      const isCameraFocusedOrTyping =
+        !webcamEnabled ||
+        cameraStatus === 'focused' ||
+        cameraStatus === 'keyboard_glance' ||
+        cameraStatus === 'initializing' ||
+        cameraStatus === 'permission_denied'
+
+      if (!isCameraFocusedOrTyping) return
+
+      // Advance Next-Leaf Growth Bar while focused! (Sprouts a new leaf every ~7 seconds at 1x speed)
+      if (focusMode === 'locked_in' || focusMode === 'golden_comeback') {
+        setVineGrowthProgress((v) => Math.min(1, v + 0.012 * stats.speedMultiplier))
+        setLeaves((prev) =>
+          prev.map((l) =>
+            l.status === 'attached' && l.health < 1
+              ? { ...l, health: Math.min(1, l.health + 0.08) }
+              : l
+          )
+        )
+        setNextLeafProgress((prog) => {
+          const step = 0.15 * Math.min(4, stats.speedMultiplier)
+          if (prog + step >= 1) {
+            sproutOneLeaf()
+            return 0.05
+          }
+          return prog + step
+        })
+      }
+
       setStats((prev) => {
         const delta = prev.speedMultiplier
 
@@ -450,20 +542,21 @@ export function App() {
             ...prev,
             focusSeconds: prev.focusSeconds + delta,
             unbrokenFocusSeconds: prev.unbrokenFocusSeconds + delta,
-            roomTempCelsius: Math.min(24, prev.roomTempCelsius + 0.35 * delta),
+            roomTempCelsius: Math.min(24, prev.roomTempCelsius + 0.4 * delta),
           }
         }
 
         if (focusMode === 'last_leaf_climax') {
-          const nextComeback = prev.comebackProgressSeconds + delta * 6
+          const nextComeback = prev.comebackProgressSeconds + delta * 10
           if (nextComeback >= 300) {
             setFocusMode('golden_comeback')
             setRoommateState('painting_golden_leaf')
+            sproutOneLeaf()
             const quote = pickRandomDialogue('painting_golden_leaf')
             setDialogueText(quote)
             appendLog(
               'redemption',
-              'THE O. HENRY TWIST! Locked in for 5 straight minutes — Roommate painted a permanent Golden Leaf on the brick wall!',
+              'THE O. HENRY TWIST! Locked in before the last leaf fell — Roommate painted a permanent Golden Leaf on the brick wall!',
               quote
             )
             return {
@@ -486,7 +579,7 @@ export function App() {
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [focusMode, appendLog])
+  }, [focusMode, webcamEnabled, cameraStatus, stats.speedMultiplier, sproutOneLeaf, appendLog])
 
   // Unlock cozy studio upgrades automatically as focus time grows
   useEffect(() => {
@@ -517,49 +610,13 @@ export function App() {
     setRoommateState('typing')
     const quote = pickRandomDialogue('typing')
     setDialogueText(quote)
-    setVineGrowthProgress((p) => Math.min(1, p + 0.08))
-
-    setLeaves((prev) => {
-      const healed = prev.map((l) =>
-        l.status === 'attached' || l.status === 'dying'
-          ? { ...l, status: 'attached' as const, health: 1, hasBlossom: true }
-          : l
-      )
-      const attachedCount = healed.filter((l) => l.status === 'attached').length
-      if (attachedCount >= 8) return healed
-
-      const newId = healed.length + 1
-      const segIdx = Math.min(attachedCount, vineSegments.length - 1)
-      const seg = vineSegments[segIdx]
-      const side: -1 | 1 = newId % 2 === 0 ? -1 : 1
-      const newLeaf: LeafNode = {
-        id: newId,
-        segmentIndex: segIdx,
-        side,
-        size: 13 + (newId % 3) * 2.5,
-        baseAngle: side * (0.5 + (newId % 2) * 0.25),
-        health: 1,
-        status: 'attached',
-        hasBlossom: true,
-        blossomScale: 1.1,
-        blossomColor: BLOSSOM_COLORS[newId % BLOSSOM_COLORS.length],
-        x: seg.x1,
-        y: seg.y1,
-        vx: 0,
-        vy: 0,
-        rotation: 0,
-        vRot: 0,
-        swayPhase: Math.random() * Math.PI * 2,
-        seed: newId * 2.17,
-      }
-      return [...healed, newLeaf]
-    })
+    sproutOneLeaf()
+    setNextLeafProgress(0.35)
 
     setStats((prev) => ({
       ...prev,
       focusSeconds: prev.focusSeconds + 180,
       unbrokenFocusSeconds: prev.unbrokenFocusSeconds + 180,
-      leavesGrown: prev.leavesGrown + 1,
       roomTempCelsius: Math.min(24, prev.roomTempCelsius + 3),
     }))
 
@@ -585,8 +642,8 @@ export function App() {
           return {
             ...leaf,
             status: 'attached' as const,
-            health: 0.42,
-            segmentIndex: Math.min(3, vineSegments.length - 1),
+            health: 0.45,
+            segmentIndex: 2,
           }
         }
         if (leaf.status === 'attached') {
@@ -622,6 +679,7 @@ export function App() {
   const handleTriggerGoldenLeafTwist = () => {
     setFocusMode('golden_comeback')
     setRoommateState('painting_golden_leaf')
+    sproutOneLeaf()
     const quote = pickRandomDialogue('painting_golden_leaf')
     setDialogueText(quote)
 
@@ -653,7 +711,8 @@ export function App() {
     setFocusMode('locked_in')
     setRoommateState('typing')
     setLeaves(createInitialLeaves(vineSegments))
-    setVineGrowthProgress(0.78)
+    setVineGrowthProgress(0.45)
+    setNextLeafProgress(0.25)
     setDaysSinceDoomscroll(4)
     setDialogueText(pickRandomDialogue('typing'))
     setStats({
@@ -683,9 +742,8 @@ export function App() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-stone-950 text-stone-100 select-none">
-      {/* 1. COMPACT TOP HEADER BAR (No scroll, everything accessible in 1 click) */}
+      {/* 1. COMPACT TOP HEADER BAR */}
       <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-stone-800 bg-stone-950 px-3">
-        {/* Brand + Anchor Task */}
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/15 text-emerald-400">
             <Leaf className="h-4 w-4" />
@@ -713,6 +771,10 @@ export function App() {
             <Play className="h-3 w-3" />
             {Math.floor(stats.focusSeconds / 60)}m {stats.focusSeconds % 60}s
           </span>
+          <span className="flex items-center gap-1 text-emerald-300 font-bold">
+            <Leaf className="h-3 w-3" />
+            Leaves: {attachedLeavesCount}/14
+          </span>
           <span
             className="flex items-center gap-1 text-teal-300"
             title="Authorized switches to your whitelisted tabs"
@@ -722,7 +784,7 @@ export function App() {
           </span>
           <span
             className="flex items-center gap-1 text-rose-400"
-            title="Unauthorized tab switches & phone glances"
+            title="Unauthorized tab switches & phone doomscrolls"
           >
             <EyeOff className="h-3 w-3" />
             Violations: {stats.tabSwitches + stats.phoneAlerts}
@@ -798,7 +860,7 @@ export function App() {
         </div>
       </header>
 
-      {/* 2. WHITELISTED TABS QUICK-SWITCH BAR (Click an allowed tab to switch or expand sub-tabs) */}
+      {/* 2. WHITELISTED TABS QUICK-SWITCH BAR */}
       <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-stone-800/80 bg-stone-900/60 px-3 overflow-x-auto">
         <div className="flex items-center gap-1.5 min-w-0">
           <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-stone-400 shrink-0">
@@ -841,7 +903,7 @@ export function App() {
             </span>
           ) : (
             <span className="text-stone-400 hidden lg:inline">
-              Unapproved tab switches = instant leaf casualty
+              Keyboard glances (6.5s grace) = SAFE · Unapproved tab = Leaf drops
             </span>
           )}
         </div>
@@ -849,7 +911,6 @@ export function App() {
 
       {/* 3. MAIN CENTER STAGE (Fits remaining viewport height with 0 scrolling) */}
       <main className="relative flex flex-1 min-h-0 w-full items-center justify-center p-2.5 overflow-hidden">
-        {/* Studio Canvas fills available space proportionally */}
         <div className="h-full w-full max-w-5xl">
           <StudioCanvas
             focusMode={focusMode}
@@ -857,6 +918,7 @@ export function App() {
             leaves={leaves}
             vineSegments={vineSegments}
             vineGrowthProgress={vineGrowthProgress}
+            nextLeafProgress={nextLeafProgress}
             upgrades={upgrades}
             daysSinceDoomscroll={daysSinceDoomscroll}
             goldenLeavesPainted={stats.goldenLeavesPainted}
@@ -867,7 +929,7 @@ export function App() {
           />
         </div>
 
-        {/* FLOATING LIVE WEBCAM GUARD (Bottom-Left Corner — collapsible pill or live PiP monitor) */}
+        {/* FLOATING LIVE WEBCAM GUARD (Bottom-Left Corner) */}
         <div className="absolute bottom-4 left-4 z-20 max-w-xs">
           {isWebcamExpanded ? (
             <div className="relative shadow-2xl">
@@ -897,6 +959,8 @@ export function App() {
                   ? 'border-rose-500 bg-rose-950/90 text-rose-200 animate-pulse'
                   : cameraStatus === 'away_detected'
                   ? 'border-amber-500 bg-amber-950/90 text-amber-200 animate-pulse'
+                  : cameraStatus === 'keyboard_glance'
+                  ? 'border-sky-500 bg-sky-950/90 text-sky-200'
                   : 'border-stone-700 bg-stone-900/90 text-emerald-300'
               }`}
             >
@@ -907,8 +971,10 @@ export function App() {
                   ? 'PHONE DETECTED!'
                   : cameraStatus === 'away_detected'
                   ? 'AWAY FROM DESK!'
+                  : cameraStatus === 'keyboard_glance'
+                  ? 'KEYBOARD GLANCE (SAFE)'
                   : webcamEnabled
-                  ? 'LOCKED IN'
+                  ? 'ABOVE LINE (GROWING)'
                   : 'OFF'}
               </span>
               <ChevronUp className="h-3 w-3" />
@@ -916,7 +982,7 @@ export function App() {
           )}
         </div>
 
-        {/* EXPANDABLE OVERLAY DRAWERS (Top-Right over Studio — zero page scroll) */}
+        {/* EXPANDABLE OVERLAY DRAWERS */}
         {activePanel && (
           <div className="absolute top-3 right-3 z-30 w-full max-w-sm rounded-2xl border border-stone-700 bg-stone-900/95 p-3 shadow-2xl backdrop-blur-md">
             <div className="mb-2 flex items-center justify-between border-b border-stone-800 pb-1.5">
@@ -1087,7 +1153,7 @@ export function App() {
         )}
       </main>
 
-      {/* 4. COMPACT BOTTOM QUICK-ACTION DOCK (1-click story triggers & speed toggle) */}
+      {/* 4. COMPACT BOTTOM QUICK-ACTION DOCK */}
       <footer className="flex h-12 shrink-0 items-center justify-between gap-2 border-t border-stone-800 bg-stone-950 px-3 overflow-x-auto">
         <div className="flex items-center gap-1.5 shrink-0">
           <button
@@ -1095,7 +1161,7 @@ export function App() {
             className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-emerald-300 hover:bg-emerald-900/60"
           >
             <Sun className="h-3.5 w-3.5" />
-            <span>1. Lock-In (+Leaf)</span>
+            <span>1. Sprout Leaf Now</span>
           </button>
 
           <button
@@ -1113,7 +1179,7 @@ export function App() {
             className="flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-rose-300 hover:bg-rose-900/60"
           >
             <Smartphone className="h-3.5 w-3.5" />
-            <span>Phone Glance</span>
+            <span>Sim Phone</span>
           </button>
 
           <button

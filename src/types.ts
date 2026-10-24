@@ -12,6 +12,7 @@ export type CameraStatus =
   | 'off'
   | 'initializing'
   | 'focused'
+  | 'keyboard_glance'
   | 'phone_detected'
   | 'away_detected'
   | 'permission_denied'

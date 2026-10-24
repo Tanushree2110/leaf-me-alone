@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Crosshair,
   EyeOff,
+  Keyboard,
   Smartphone,
   UserX,
 } from 'lucide-react'
@@ -36,18 +37,39 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
 
-  // Baseline head vertical position (0..1 from top of frame)
-  const baselineYRef = useRef<number>(0.44)
-  const baselinePresenceRef = useRef<number>(0.18)
-  const consecutivePhoneFramesRef = useRef<number>(0)
-  const consecutiveAwayFramesRef = useRef<number>(0)
+  // Baseline screen gaze Y (0..1 from top) and keyboard glance allowance
+  const baselineYRef = useRef<number>(0.48)
+  const baselinePresenceRef = useRef<number>(0.15)
+  const autoCalibratedRef = useRef<boolean>(false)
+  const downGlanceStartMsRef = useRef<number | null>(null)
+  const awayStartMsRef = useRef<number | null>(null)
   const lastAlertTimeRef = useRef<number>(0)
+  const lastKeystrokeMsRef = useRef<number>(0)
 
-  const [sensitivity, setSensitivity] = useState<'normal' | 'strict'>('normal')
+  // Configurable horizon offset so looking at the keyboard doesn't trip the phone line
+  const [lineOffset, setLineOffset] = useState<number>(0.17)
+  const [graceSeconds] = useState<number>(6.5) // 6.5s continuous downward stare required before counting as phone
+  const [downDurationSec, setDownDurationSec] = useState<number>(0)
+  const [isTypingRecently, setIsTypingRecently] = useState<boolean>(false)
   const [liveMetrics, setLiveMetrics] = useState<{ headY: number; presence: number }>({
-    headY: 0.44,
+    headY: 0.48,
     presence: 0.25,
   })
+
+  // Listen for keyboard / mouse activity so looking down while typing is ALWAYS safe
+  useEffect(() => {
+    const handleActivity = () => {
+      lastKeystrokeMsRef.current = Date.now()
+      downGlanceStartMsRef.current = null
+      setIsTypingRecently(true)
+    }
+    window.addEventListener('keydown', handleActivity)
+    window.addEventListener('mousedown', handleActivity)
+    return () => {
+      window.removeEventListener('keydown', handleActivity)
+      window.removeEventListener('mousedown', handleActivity)
+    }
+  }, [])
 
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
@@ -88,17 +110,28 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [enabled, startCamera, stopCamera])
 
-  // Calibrate current posture as "Focused baseline"
-  const handleCalibrate = () => {
+  // Calibrate current posture as normal screen gaze
+  const handleCalibrateScreen = () => {
     baselineYRef.current = liveMetrics.headY
-    baselinePresenceRef.current = Math.max(0.08, liveMetrics.presence)
-    consecutivePhoneFramesRef.current = 0
-    consecutiveAwayFramesRef.current = 0
+    baselinePresenceRef.current = Math.max(0.06, liveMetrics.presence)
+    downGlanceStartMsRef.current = null
+    awayStartMsRef.current = null
+    setDownDurationSec(0)
     onStatusChange('focused')
     onBackFocused()
   }
 
-  // Real-time computer vision loop for head pitch (looking down at phone) & desk presence
+  // Calibrate while looking down at the keyboard so keyboard angle is guaranteed safe
+  const handleCalibrateKeyboard = () => {
+    // Set the phone threshold slightly BELOW the user's current keyboard-looking head position
+    const neededOffset = Math.max(0.12, liveMetrics.headY - baselineYRef.current + 0.06)
+    setLineOffset(Math.min(0.32, neededOffset))
+    downGlanceStartMsRef.current = null
+    setDownDurationSec(0)
+    onStatusChange('focused')
+    onBackFocused()
+  }
+
   useEffect(() => {
     if (!enabled || status === 'off' || status === 'permission_denied') return
 
@@ -120,28 +153,25 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       actx.drawImage(video, 0, 0, 64, 48)
       const frame = actx.getImageData(0, 0, 64, 48).data
 
-      // Detect skin-tone / face / upper-body pixels & compute vertical centroid
       let weightedY = 0
       let weightedX = 0
       let totalWeight = 0
-      let lowerHandsActivity = 0
 
       for (let y = 0; y < 48; y++) {
-        for (let x = 8; x < 56; x++) {
+        for (let x = 6; x < 58; x++) {
           const idx = (y * 64 + x) * 4
           const r = frame[idx]
           const g = frame[idx + 1]
           const b = frame[idx + 2]
 
-          // RGB skin-cluster & warm foreground heuristic
           const isSkinTone =
-            r > 75 &&
-            g > 40 &&
-            b > 20 &&
+            r > 70 &&
+            g > 38 &&
+            b > 18 &&
             r > g &&
             r > b &&
-            Math.abs(r - g) > 10 &&
-            r - b > 15
+            Math.abs(r - g) > 8 &&
+            r - b > 12
 
           if (isSkinTone) {
             const centerBias = 1 - Math.abs(x - 32) / 32
@@ -149,67 +179,86 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             weightedY += (y / 48) * w
             weightedX += (x / 64) * w
             totalWeight += w
-
-            if (y > 35) {
-              lowerHandsActivity += 1
-            }
           }
         }
       }
 
-      const totalPixels = 48 * 48
+      const totalPixels = 52 * 48
       const presenceRatio = totalWeight / totalPixels
-      const centroidY = totalWeight > 6 ? weightedY / totalWeight : 0.85
-      const centroidX = totalWeight > 6 ? weightedX / totalWeight : 0.5
+      const centroidY = totalWeight > 5 ? weightedY / totalWeight : 0.5
+      const centroidX = totalWeight > 5 ? weightedX / totalWeight : 0.5
+
+      // Auto-calibrate on the first valid camera frame so it adapts to your natural seating height
+      if (!autoCalibratedRef.current && totalWeight > 12) {
+        baselineYRef.current = centroidY
+        baselinePresenceRef.current = Math.max(0.06, presenceRatio)
+        autoCalibratedRef.current = true
+      }
 
       setLiveMetrics({ headY: centroidY, presence: presenceRatio })
 
-      // Thresholds based on sensitivity
-      const pitchDropThreshold = sensitivity === 'strict' ? 0.075 : 0.11
-      const minPresence = Math.max(0.035, baselinePresenceRef.current * 0.28)
+      const now = Date.now()
+      const typingActive = now - lastKeystrokeMsRef.current < 4500
+      setIsTypingRecently(typingActive)
+
+      const minPresence = Math.max(0.025, baselinePresenceRef.current * 0.22)
+      const phoneThresholdY = Math.min(0.86, baselineYRef.current + lineOffset)
 
       const isAway = presenceRatio < minPresence
-      const isLookingDownAtPhone =
-        !isAway &&
-        (centroidY - baselineYRef.current > pitchDropThreshold ||
-          (centroidY > 0.56 && lowerHandsActivity > 38))
-
-      const now = Date.now()
+      const isBelowLine = !isAway && centroidY > phoneThresholdY
 
       if (isAway) {
-        consecutiveAwayFramesRef.current += 1
-        consecutivePhoneFramesRef.current = 0
-        if (consecutiveAwayFramesRef.current >= 4) {
+        if (!awayStartMsRef.current) awayStartMsRef.current = now
+        downGlanceStartMsRef.current = null
+        setDownDurationSec(0)
+        const awaySec = (now - awayStartMsRef.current) / 1000
+        if (awaySec >= 3.5) {
           onStatusChange('away_detected')
-          if (now - lastAlertTimeRef.current > 6500) {
+          if (now - lastAlertTimeRef.current > 8000) {
             lastAlertTimeRef.current = now
             onAwayDetected()
           }
         }
-      } else if (isLookingDownAtPhone) {
-        consecutivePhoneFramesRef.current += 1
-        consecutiveAwayFramesRef.current = 0
-        if (consecutivePhoneFramesRef.current >= 3) {
-          onStatusChange('phone_detected')
-          if (now - lastAlertTimeRef.current > 5500) {
-            lastAlertTimeRef.current = now
-            onPhoneDetected()
+      } else if (isBelowLine) {
+        awayStartMsRef.current = null
+
+        // If actively typing on keyboard, reset phone timer and mark as safe keyboard glance!
+        if (typingActive) {
+          downGlanceStartMsRef.current = null
+          setDownDurationSec(0)
+          onStatusChange('keyboard_glance')
+          onBackFocused()
+        } else {
+          if (!downGlanceStartMsRef.current) downGlanceStartMsRef.current = now
+          const elapsedSec = (now - downGlanceStartMsRef.current) / 1000
+          setDownDurationSec(elapsedSec)
+
+          if (elapsedSec < graceSeconds) {
+            // Within the 6.5s Keyboard Glance Grace period: safe!
+            if (status !== 'keyboard_glance') {
+              onStatusChange('keyboard_glance')
+            }
+          } else {
+            // Stared down below the line for > 6.5s continuously without looking back up: Phone detected!
+            onStatusChange('phone_detected')
+            if (now - lastAlertTimeRef.current > 7500) {
+              lastAlertTimeRef.current = now
+              onPhoneDetected()
+            }
           }
         }
       } else {
-        consecutivePhoneFramesRef.current = Math.max(0, consecutivePhoneFramesRef.current - 1)
-        consecutiveAwayFramesRef.current = Math.max(0, consecutiveAwayFramesRef.current - 1)
-        if (
-          consecutivePhoneFramesRef.current === 0 &&
-          consecutiveAwayFramesRef.current === 0 &&
-          status !== 'focused'
-        ) {
+        // Looking above the line! Immediately clear timers & restore focus
+        awayStartMsRef.current = null
+        downGlanceStartMsRef.current = null
+        setDownDurationSec(0)
+        if (status !== 'focused') {
           onStatusChange('focused')
-          onBackFocused()
         }
+        onBackFocused()
       }
 
-      // Draw live HUD reticle on the overlay canvas
+      // Draw live HUD reticle & threshold line on overlay canvas
       if (overlay) {
         const octx = overlay.getContext('2d')
         if (octx) {
@@ -217,34 +266,51 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           const H = overlay.height
           octx.clearRect(0, 0, W, H)
 
-          // Phone-glance horizon threshold line
-          const threshY = Math.min(0.85, baselineYRef.current + pitchDropThreshold) * H
-          octx.strokeStyle = 'rgba(251, 191, 36, 0.45)'
-          octx.lineWidth = 1
-          octx.setLineDash([4, 4])
+          const threshPx = phoneThresholdY * H
+
+          // Draw threshold line (Cyan when safe/typing, Red when phone timer exceeded)
+          octx.strokeStyle =
+            status === 'phone_detected'
+              ? 'rgba(244, 63, 94, 0.9)'
+              : 'rgba(56, 189, 248, 0.75)'
+          octx.lineWidth = 1.5
+          octx.setLineDash([4, 3])
           octx.beginPath()
-          octx.moveTo(0, threshY)
-          octx.lineTo(W, threshY)
+          octx.moveTo(0, threshPx)
+          octx.lineTo(W, threshPx)
           octx.stroke()
           octx.setLineDash([])
 
-          // Draw head centroid tracking reticle
+          // Label the zone below the line as KEYBOARD / PHONE ZONE
+          octx.fillStyle = 'rgba(15, 23, 42, 0.65)'
+          octx.fillRect(2, threshPx + 2, W - 4, 11)
+          octx.fillStyle = '#bae6fd'
+          octx.font = 'bold 7.5px "JetBrains Mono", monospace'
+          octx.fillText('↓ KEYBOARD (6.5s GRACE) / PHONE', 4, threshPx + 10)
+
+          // Draw head tracking box
           if (!isAway) {
-            const rx = (1 - centroidX) * W // mirrored video
+            const rx = (1 - centroidX) * W
             const ry = centroidY * H
-            octx.strokeStyle = isLookingDownAtPhone ? '#f43f5e' : '#10b981'
+            octx.strokeStyle =
+              status === 'phone_detected'
+                ? '#f43f5e'
+                : isBelowLine
+                ? '#38bdf8'
+                : '#10b981'
             octx.lineWidth = 2
-            octx.strokeRect(rx - 22, ry - 22, 44, 44)
+            octx.strokeRect(rx - 18, ry - 18, 36, 36)
           }
         }
       }
-    }, 380)
+    }, 300)
 
     return () => clearInterval(interval)
   }, [
     enabled,
     status,
-    sensitivity,
+    lineOffset,
+    graceSeconds,
     onStatusChange,
     onPhoneDetected,
     onAwayDetected,
@@ -256,13 +322,22 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       case 'focused':
         return (
           <span className="flex items-center gap-1 text-emerald-400">
-            <CheckCircle2 className="h-3 w-3" /> EYES ON SCREEN
+            <CheckCircle2 className="h-3 w-3" /> ABOVE LINE (GROWING)
+          </span>
+        )
+      case 'keyboard_glance':
+        return (
+          <span className="flex items-center gap-1 text-sky-300 font-bold">
+            <Keyboard className="h-3 w-3" />{' '}
+            {isTypingRecently
+              ? 'TYPING ON KEYBOARD (SAFE)'
+              : `KEYBOARD GLANCE (${Math.max(0, graceSeconds - downDurationSec).toFixed(1)}s GRACE)`}
           </span>
         )
       case 'phone_detected':
         return (
           <span className="flex items-center gap-1 animate-pulse text-rose-400 font-extrabold">
-            <Smartphone className="h-3 w-3" /> PHONE GLANCE DETECTED!
+            <Smartphone className="h-3 w-3" /> PHONE DOOMSCROLL!
           </span>
         )
       case 'away_detected':
@@ -281,14 +356,24 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   }
 
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-stone-800 bg-stone-900/90 p-2.5">
+    <div className="flex flex-col gap-2 rounded-xl border border-stone-800 bg-stone-900/95 p-2.5 backdrop-blur-md">
       <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5 font-mono text-[11px] font-bold">
+        <div className="flex items-center gap-1.5 font-mono text-[10.5px] font-bold">
           <Camera className="h-3.5 w-3.5 text-emerald-400" />
-          <span>Webcam Phone &amp; Drift Guard</span>
+          <span>Webcam Guard</span>
         </div>
-        <div className="font-mono text-[10px] font-bold">{statusBadge()}</div>
+        <div className="font-mono text-[9.5px] font-bold">{statusBadge()}</div>
       </div>
+
+      {/* Grace Bar when glancing down at keyboard */}
+      {status === 'keyboard_glance' && !isTypingRecently && (
+        <div className="w-full overflow-hidden rounded-full bg-stone-800 h-1.5">
+          <div
+            className="h-full bg-sky-400 transition-all duration-200"
+            style={{ width: `${Math.min(100, (downDurationSec / graceSeconds) * 100)}%` }}
+          />
+        </div>
+      )}
 
       {/* Live Camera Viewport + Tracking Reticle */}
       <div className="relative flex gap-2.5 items-center">
@@ -298,9 +383,11 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           } shrink-0 ${
             status === 'phone_detected'
               ? 'border-rose-500 ring-2 ring-rose-500/40'
+              : status === 'keyboard_glance'
+              ? 'border-sky-400/70'
               : status === 'away_detected'
               ? 'border-amber-500 ring-2 ring-amber-500/40'
-              : 'border-stone-700'
+              : 'border-emerald-500/50'
           }`}
         >
           <video
@@ -322,64 +409,79 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           {(!enabled || status === 'off' || status === 'permission_denied') && (
             <div className="flex h-full w-full flex-col items-center justify-center p-2 text-center font-mono text-[9px] text-stone-500">
               <CameraOff className="mb-1 h-4 w-4 text-stone-600" />
-              {status === 'permission_denied' ? 'Allow camera in browser' : 'Camera Paused'}
+              {status === 'permission_denied' ? 'Allow camera' : 'Camera Off'}
             </div>
           )}
         </div>
 
-        {/* Camera Controls & Posture Calibration */}
-        <div className="flex flex-1 flex-col justify-between gap-1.5 font-mono text-[10px]">
+        {/* Camera Controls & Keyboard-Safe Calibration */}
+        <div className="flex flex-1 flex-col justify-between gap-1 font-mono text-[9.5px]">
           <div className="flex flex-wrap gap-1">
             <button
-              onClick={onToggleEnabled}
-              className={`rounded-md px-2 py-1 font-bold transition ${
-                enabled
-                  ? 'bg-emerald-600/20 text-emerald-300 border border-emerald-500/40'
-                  : 'bg-stone-800 text-stone-300 hover:bg-stone-700'
-              }`}
-            >
-              {enabled ? 'Cam: ON' : 'Turn Cam ON'}
-            </button>
-            <button
-              onClick={handleCalibrate}
+              onClick={handleCalibrateScreen}
               disabled={!enabled}
-              className="flex items-center gap-1 rounded-md border border-stone-700 bg-stone-800 px-2 py-1 text-stone-200 hover:bg-stone-700 disabled:opacity-40"
-              title="Set your current sitting posture as the focused baseline"
+              className="flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-950/50 px-1.5 py-0.5 text-emerald-200 hover:bg-emerald-900/60 disabled:opacity-40"
+              title="Click while looking at your screen"
             >
-              <Crosshair className="h-3 w-3 text-emerald-400" />
-              Calibrate Posture
+              <Crosshair className="h-2.5 w-2.5 text-emerald-400" />
+              Set Screen Gaze
             </button>
             <button
-              onClick={() => setSensitivity((s) => (s === 'normal' ? 'strict' : 'normal'))}
-              className="rounded-md border border-stone-700 bg-stone-800 px-2 py-1 text-stone-300 hover:bg-stone-700"
+              onClick={handleCalibrateKeyboard}
+              disabled={!enabled}
+              className="flex items-center gap-1 rounded border border-sky-500/40 bg-sky-950/50 px-1.5 py-0.5 text-sky-200 hover:bg-sky-900/60 disabled:opacity-40"
+              title="Look down at your keyboard and click this so keyboard glances never trigger phone alerts"
             >
-              Sens: {sensitivity.toUpperCase()}
+              <Keyboard className="h-2.5 w-2.5 text-sky-400" />
+              Set Keyboard Safe
             </button>
           </div>
 
-          <div className="text-[9.5px] text-stone-400 leading-tight">
-            Yellow dashed line = phone-glance horizon. Look down below it or leave frame to trigger roommate review.
+          {/* Adjust line height nudger */}
+          <div className="flex items-center justify-between gap-1 text-[9px] text-stone-400">
+            <span>Line Depth:</span>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setLineOffset((v) => Math.max(0.08, +(v - 0.03).toFixed(2)))}
+                className="rounded bg-stone-800 px-1.5 py-0.5 text-stone-200 hover:bg-stone-700"
+                title="Move threshold line higher"
+              >
+                ▲ Higher
+              </button>
+              <button
+                onClick={() => setLineOffset((v) => Math.min(0.35, +(v + 0.03).toFixed(2)))}
+                className="rounded bg-stone-800 px-1.5 py-0.5 text-stone-200 hover:bg-stone-700"
+                title="Move threshold line lower (more room for keyboard glances)"
+              >
+                ▼ Lower
+              </button>
+              <button
+                onClick={onToggleEnabled}
+                className="rounded bg-stone-800 px-1.5 py-0.5 text-stone-400 hover:text-white"
+              >
+                {enabled ? 'Off' : 'On'}
+              </button>
+            </div>
           </div>
 
-          {/* Instant Simulation Triggers in case user wants to test without tilting head */}
           <div className="flex flex-wrap gap-1 pt-0.5">
             <button
               onClick={() => {
                 onStatusChange('phone_detected')
                 onPhoneDetected()
               }}
-              className="flex items-center gap-1 rounded border border-rose-500/30 bg-rose-950/40 px-1.5 py-0.5 text-[9.5px] text-rose-300 hover:bg-rose-900/50"
+              className="flex items-center gap-1 rounded border border-rose-500/30 bg-rose-950/40 px-1.5 py-0.5 text-[9px] text-rose-300 hover:bg-rose-900/50"
             >
-              <Smartphone className="h-2.5 w-2.5" /> Sim Phone Glance
+              <Smartphone className="h-2.5 w-2.5" /> Test Phone
             </button>
             <button
               onClick={() => {
                 onStatusChange('away_detected')
                 onAwayDetected()
               }}
-              className="flex items-center gap-1 rounded border border-amber-500/30 bg-amber-950/40 px-1.5 py-0.5 text-[9.5px] text-amber-300 hover:bg-amber-900/50"
+              className="flex items-center gap-1 rounded border border-amber-500/30 bg-amber-950/40 px-1.5 py-0.5 text-[9px] text-amber-300 hover:bg-amber-900/50"
             >
-              <EyeOff className="h-2.5 w-2.5" /> Sim Drift Away
+              <EyeOff className="h-2.5 w-2.5" /> Test Away
             </button>
           </div>
         </div>
