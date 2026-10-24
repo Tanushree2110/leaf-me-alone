@@ -656,12 +656,12 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = ({
   ])
 
   return (
-    <div className="relative w-full overflow-hidden rounded-2xl border border-stone-800 bg-stone-950 shadow-2xl">
+    <div className="relative flex h-full w-full items-center justify-center overflow-hidden rounded-2xl border border-stone-800 bg-stone-950 shadow-2xl">
       <canvas
         ref={canvasRef}
         width={820}
         height={480}
-        className="block h-auto w-full"
+        className="block max-h-full max-w-full object-contain"
       />
     </div>
   )

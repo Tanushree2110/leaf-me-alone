@@ -2,43 +2,55 @@ import { RoommateState, RoomUpgrade } from '../types'
 
 export const DIALOGUE_BY_STATE: Record<RoommateState, string[]> = {
   typing: [
-    " Headphones on. Deep work mode engaged. Look at that vine reach for the sun!",
-    "Brewed a fresh pour-over. If you keep this cadence up, we might actually afford a bookshelf.",
-    "Chlorophyll levels optimal. Not a single Reddit tab in sight. I'm almost proud of you.",
+    "Headphones on. Eyes on screen, only whitelisted tabs open. Look at that vine reach for the sun!",
+    "Brewed a fresh pour-over. Camera sees you locked in—not a phone in sight.",
+    "Chlorophyll levels optimal. Approved workspace tabs only. I'm almost proud of you.",
     "Look at Leaf #4 blooming! Turns out your attention span CAN sustain biological life.",
     "Typing at 90 WPM right alongside you. Our studio apartment has never felt warmer.",
   ],
   glaring_with_clipboard: [
-    "Oh, don't mind me. I'll just document Tab Switch #14 on your quarterly focus review.",
-    "Interesting. You left the window for 6 seconds and a leaf immediately died of cringe.",
-    "*Clicks pen aggressively* 'Subject exhibits goldfish-tier dopamine regulation.'",
-    "Was that X, Reddit, or YouTube? Don't lie to me, I can feel the frost on the windowpane.",
-    "I just reset the 'DAYS SINCE LAST DOOMSCROLL' sign back to 0. Hope that meme was worth it.",
+    "Oh, don't mind me. Documenting an UNAUTHORIZED tab switch on your performance review.",
+    "Excuse me, that tab was NOT on your initial whitelist. Leaf #3 just died of betrayal.",
+    "I see you looking down at your phone on camera! Put it down before the vine freezes!",
+    "*Clicks pen aggressively* 'Subject drifted away from desk / checked phone mid-sprint.'",
+    "I just reset the 'DAYS SINCE LAST DOOMSCROLL' sign to 0. Stick to your allowed tabs!",
   ],
   sweeping_leaves: [
-    "Oh, don't mind me. I'll just sweep up the corpse of Leaf #3 while you check notifications.",
-    "*Sweeps crispy brown leaf* Another innocent botanical casualty of your tab-switching.",
-    "I'm a desktop companion, not a municipal leaf-blower. Lock back in before the floor disappears!",
-    "Crunch, crunch, crunch. That's the sound of our cozy greenhouse turning into a mulch pile.",
+    "Oh, don't mind me. I'll just sweep up the corpse of Leaf #3 while you check your phone.",
+    "*Sweeps crispy brown leaf* Another botanical casualty of an unapproved tab switch.",
+    "I'm a desktop companion, not a leaf-blower. Stay on your whitelisted tabs!",
+    "Crunch, crunch. That's the sound of our greenhouse dying every time you look at your phone.",
   ],
   shivering: [
-    "B-b-brrr! Your procrastination dropped the apartment temperature to 9°C! Put the phone down!",
-    "I had to put on my emergency puffer jacket because your focus flatlined.",
-    "Frost is literally creeping across the glass. Type something productive before my coffee freezes!",
-    "My fingers are too numb to type. Is this how we live now? In a frozen wasteland of open tabs?",
+    "B-b-brrr! You drifted away from the camera and the room dropped to 9°C!",
+    "I had to put on my emergency puffer jacket because you opened an unapproved tab.",
+    "Frost is creeping across the glass. Eyes back on screen before my matcha freezes!",
+    "My fingers are too numb to type. Put the phone down and warm this room up!",
   ],
   dramatic_sickbed: [
-    "The doctors say when that last leaf falls, this sprint ticket dies with me... *coughs melodramatically*",
-    "Johnsy had pneumonia in Greenwich Village; I have terminal Second-Screen Syndrome.",
-    "Tell my mother I died waiting for you to finish one 25-minute focus block...",
-    "Only one trembling leaf remains against the storm. Lock in for 5 minutes or let the curtain fall!",
+    "The doctors say when that last leaf falls, this sprint ticket dies with me... *coughs*",
+    "Johnsy had pneumonia in Greenwich Village; I have terminal Phone-Glance Syndrome.",
+    "Tell my mother I died waiting for you to stay on your whitelisted tabs for 5 minutes...",
+    "Only one trembling leaf remains against the storm. Lock in on camera or let the curtain fall!",
   ],
   painting_golden_leaf: [
     "WAIT! You locked back in?! Hand me my beret and 24-karat gold paint—this vine WILL NOT DIE TODAY!",
     "Pulling a full O. Henry masterpiece on the brick wall! Behold: The Immortal Golden Leaf!",
-    "Against all odds and 19 tab switches, we survived the storm! A permanent gold badge for the wall!",
+    "Against all odds, we survived the storm! A permanent gold badge on the brick wall!",
   ],
 }
+
+export const PHONE_DETECTED_QUOTES = [
+  "EYES UP! My webcam sensor literally sees you looking down at your phone! *Clicks clipboard pen*",
+  "Put the phone down! Leaf #3 is shriveling up while you check notifications!",
+  "Caught in 4K on webcam looking at your phone. Resetting DOOMSCROLL counter to 0!",
+]
+
+export const AWAY_DETECTED_QUOTES = [
+  "Hello?! Webcam says you drifted out of frame! Who abandons a photosynthesis session?!",
+  "You wandered away from the desk and the studio temperature plummeted!",
+  "*Glares into empty webcam* Must be nice to walk away while I sweep dead leaves.",
+]
 
 export const INITIAL_UPGRADES: RoomUpgrade[] = [
   {

@@ -2,25 +2,34 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Award,
   Camera,
+  Check,
+  ChevronDown,
+  ChevronUp,
   ClipboardList,
-  Coffee,
+  ExternalLink,
   EyeOff,
   FastForward,
-  Flame,
+  GitBranch,
+  Layers,
   Leaf,
-  Maximize2,
-  Minimize2,
+  Lock,
   Play,
+  Plus,
   RotateCcw,
   ShieldAlert,
+  ShieldCheck,
+  Sliders,
+  Smartphone,
   Sparkles,
   Sun,
   ThermometerSnowflake,
-  Wind,
-  Zap,
+  Video,
+  X,
 } from 'lucide-react'
 import {
   ActivityLogItem,
+  AllowedTab,
+  CameraStatus,
   FocusMode,
   LeafNode,
   RoommateState,
@@ -28,12 +37,20 @@ import {
   SessionStats,
   VineSegment,
 } from './types'
-import { INITIAL_UPGRADES, pickRandomDialogue } from './utils/dialogue'
+import {
+  AWAY_DETECTED_QUOTES,
+  INITIAL_UPGRADES,
+  PHONE_DETECTED_QUOTES,
+  pickRandomDialogue,
+} from './utils/dialogue'
 import { StudioCanvas } from './components/StudioCanvas'
 import { PolaroidModal } from './components/PolaroidModal'
+import { WebcamGuard } from './components/WebcamGuard'
+import { AllowedTabsManager } from './components/AllowedTabsManager'
+
+type ExpandablePanel = 'tabs' | 'upgrades' | 'simulator' | 'log' | null
 
 function generateProceduralVineSegments(): VineSegment[] {
-  // Starts at the terracotta pot on the window sill (x=106, y=342) and climbs up the windowpane
   const points = [
     { x: 106, y: 342 },
     { x: 96, y: 298 },
@@ -98,6 +115,12 @@ function createInitialLeaves(segments: VineSegment[]): LeafNode[] {
   return list
 }
 
+const INITIAL_ALLOWED_TABS: AllowedTab[] = [
+  { id: 'tab-1', title: 'VS Code / Localhost', url: 'http://localhost:5173' },
+  { id: 'tab-2', title: 'React / MDN Docs', url: 'https://react.dev' },
+  { id: 'tab-3', title: 'Figma Sprint Spec', url: 'https://figma.com' },
+]
+
 export function App() {
   const studioCanvasRef = useRef<HTMLCanvasElement>(null)
   const vineSegments = useMemo(() => generateProceduralVineSegments(), [])
@@ -109,17 +132,32 @@ export function App() {
   const [upgrades, setUpgrades] = useState<RoomUpgrade[]>(INITIAL_UPGRADES)
   const [daysSinceDoomscroll, setDaysSinceDoomscroll] = useState<number>(4)
   const [dialogueText, setDialogueText] = useState<string>(
-    "Headphones on. Deep work mode engaged. Look at that procedural ivy reach for the sun!"
+    'Headphones on. Eyes on screen, only whitelisted tabs open. Look at that vine reach for the sun!'
   )
+
+  // Expandable UI Drawers & Modals (Zero-scroll single-screen layout)
+  const [activePanel, setActivePanel] = useState<ExpandablePanel>(null)
   const [isPolaroidOpen, setIsPolaroidOpen] = useState<boolean>(false)
-  const [isCompactCornerMode, setIsCompactCornerMode] = useState<boolean>(false)
-  const [realTabDetectionEnabled, setRealTabDetectionEnabled] = useState<boolean>(true)
+  const [isWebcamExpanded, setIsWebcamExpanded] = useState<boolean>(true)
+
+  // Webcam Guard State (ON by default as requested!)
+  const [webcamEnabled, setWebcamEnabled] = useState<boolean>(true)
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('initializing')
+
+  // Allowed Tabs Whitelist State
+  const [allowedTabs, setAllowedTabs] = useState<AllowedTab[]>(INITIAL_ALLOWED_TABS)
+  const [isWhitelistLocked, setIsWhitelistLocked] = useState<boolean>(false)
+  const [activeAllowedTabId, setActiveAllowedTabId] = useState<string | null>('tab-1')
+  const authorizedSwitchUntilRef = useRef<number>(0)
+  const [authorizedPassSecondsLeft, setAuthorizedPassSecondsLeft] = useState<number>(0)
 
   const [stats, setStats] = useState<SessionStats>({
     focusSeconds: 240,
     unbrokenFocusSeconds: 240,
     comebackProgressSeconds: 0,
     tabSwitches: 0,
+    authorizedTabSwitches: 0,
+    phoneAlerts: 0,
     leavesGrown: 6,
     leavesLost: 0,
     goldenLeavesPainted: 0,
@@ -131,10 +169,14 @@ export function App() {
   const [activityLog, setActivityLog] = useState<ActivityLogItem[]>([
     {
       id: 'init-1',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      timestamp: new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      }),
       type: 'focus',
-      message: 'Session started in Locked-In Mode. Sunlight pouring through the studio window.',
-      quote: 'Chlorophyll levels optimal. Not a single Reddit tab in sight.',
+      message: 'Session started. Specify your initial Allowed Tabs and keep Webcam Guard active!',
+      quote: 'Chlorophyll levels optimal. Approved workspace tabs only.',
     },
   ])
 
@@ -156,16 +198,23 @@ export function App() {
     []
   )
 
-  // Trigger a distraction event (either from real tab switch or manual simulation button)
+  const togglePanel = (panel: ExpandablePanel) => {
+    setActivePanel((prev) => (prev === panel ? null : panel))
+  }
+
+  // Trigger a distraction event (unapproved tab switch, phone glance, or drifting away from camera)
   const triggerDistraction = useCallback(
-    (reason = 'Switched browser tab') => {
+    (
+      reason = 'Opened an unapproved tab',
+      customQuotes?: string[],
+      logType: ActivityLogItem['type'] = 'distraction'
+    ) => {
       setDaysSinceDoomscroll(0)
 
       setLeaves((prevLeaves) => {
         const attached = prevLeaves.filter((l) => l.status === 'attached' || l.status === 'dying')
         if (attached.length === 0) return prevLeaves
 
-        // Pick newest leaf at top of vine to wither and fall
         const victim = attached[attached.length - 1]
         const seg = vineSegments[Math.min(victim.segmentIndex, vineSegments.length - 1)]
         const remainingAfterDrop = attached.length - 1
@@ -183,14 +232,12 @@ export function App() {
               vRot: (Math.random() - 0.5) * 0.08,
             }
           }
-          // Slightly drain health of remaining leaves
           if (leaf.status === 'attached') {
             return { ...leaf, health: Math.max(0.45, leaf.health - 0.12) }
           }
           return leaf
         })
 
-        // Determine if we just hit "The Last Leaf" Climax (1 leaf left!)
         if (remainingAfterDrop === 1) {
           setFocusMode('last_leaf_climax')
           setRoommateState('dramatic_sickbed')
@@ -203,19 +250,25 @@ export function App() {
           )
         } else {
           setFocusMode('distracted')
-          // Alternate between glaring with clipboard, sweeping leaves, and shivering in puffer jacket
           const nextStates: RoommateState[] = [
             'glaring_with_clipboard',
             'sweeping_leaves',
             'shivering',
           ]
-          const chosenState = nextStates[Math.floor(Math.random() * nextStates.length)]
+          const chosenState = customQuotes
+            ? 'glaring_with_clipboard'
+            : nextStates[Math.floor(Math.random() * nextStates.length)]
           setRoommateState(chosenState)
-          const quote = pickRandomDialogue(chosenState, victim.id)
+          const quote = customQuotes
+            ? customQuotes[Math.floor(Math.random() * customQuotes.length)].replace(
+                '#3',
+                `#${victim.id}`
+              )
+            : pickRandomDialogue(chosenState, victim.id)
           setDialogueText(quote)
           appendLog(
-            'distraction',
-            `${reason} — Leaf #${victim.id} withered and detached onto the apartment floor.`,
+            logType,
+            `${reason} — Leaf #${victim.id} withered and detached onto the floor.`,
             quote
           )
         }
@@ -225,7 +278,8 @@ export function App() {
 
       setStats((prev) => ({
         ...prev,
-        tabSwitches: prev.tabSwitches + 1,
+        tabSwitches: logType === 'distraction' ? prev.tabSwitches + 1 : prev.tabSwitches,
+        phoneAlerts: logType === 'camera' ? prev.phoneAlerts + 1 : prev.phoneAlerts,
         unbrokenFocusSeconds: 0,
         comebackProgressSeconds: 0,
         leavesLost: prev.leavesLost + 1,
@@ -235,17 +289,116 @@ export function App() {
     [appendLog, vineSegments]
   )
 
-  // Listen to real browser `visibilitychange` so switching tabs triggers the passive-aggressive roommate!
+  // Switch to an Allowed Whitelisted Tab (Grants a safe authorized switch pass so visibilitychange doesn't punish you!)
+  const handleSwitchToAllowedTab = (tab: AllowedTab) => {
+    setActiveAllowedTabId(tab.id)
+    authorizedSwitchUntilRef.current = Date.now() + 20000 // 20s safe window to switch to that browser tab
+    setAuthorizedPassSecondsLeft(20)
+
+    setStats((prev) => ({
+      ...prev,
+      authorizedTabSwitches: prev.authorizedTabSwitches + 1,
+    }))
+
+    const quote = `Switching to whitelisted tab "${tab.title}". Approved—keep that focus flow going!`
+    setDialogueText(quote)
+    appendLog(
+      'tab_whitelist',
+      `Switched to allowed tab: "${tab.title}"${tab.parentId ? ' (Expanded Sub-Tab)' : ''}`,
+      quote
+    )
+
+    if (tab.url && tab.url.startsWith('http') && tab.url !== 'http://localhost:5173') {
+      window.open(tab.url, '_blank', 'noopener,noreferrer')
+    }
+  }
+
+  // Countdown for Authorized Tab Switch Pass
   useEffect(() => {
-    if (!realTabDetectionEnabled) return
+    if (authorizedPassSecondsLeft <= 0) return
+    const timer = setInterval(() => {
+      const rem = Math.max(0, Math.ceil((authorizedSwitchUntilRef.current - Date.now()) / 1000))
+      setAuthorizedPassSecondsLeft(rem)
+    }, 500)
+    return () => clearInterval(timer)
+  }, [authorizedPassSecondsLeft])
+
+  // Real browser `visibilitychange` listener: checks if the tab switch was authorized via the Whitelist!
+  useEffect(() => {
     const handleVisibility = () => {
       if (document.hidden) {
-        triggerDistraction('Detected real browser tab switch (visibilitychange)')
+        if (Date.now() <= authorizedSwitchUntilRef.current) {
+          // User switched to a whitelisted tab! No penalty!
+          return
+        }
+        triggerDistraction(
+          'Switched to an UNAPPROVED browser tab (not selected from your Allowed Tabs Whitelist)'
+        )
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
     return () => document.removeEventListener('visibilitychange', handleVisibility)
-  }, [realTabDetectionEnabled, triggerDistraction])
+  }, [triggerDistraction])
+
+  // Webcam Guard Callbacks
+  const handlePhoneDetected = useCallback(() => {
+    triggerDistraction(
+      'Webcam Guard: Caught looking down at phone!',
+      PHONE_DETECTED_QUOTES,
+      'camera'
+    )
+  }, [triggerDistraction])
+
+  const handleAwayDetected = useCallback(() => {
+    triggerDistraction(
+      'Webcam Guard: Drifted away from desk frame!',
+      AWAY_DETECTED_QUOTES,
+      'camera'
+    )
+  }, [triggerDistraction])
+
+  const handleCameraBackFocused = useCallback(() => {
+    if (focusMode === 'distracted') {
+      setFocusMode('locked_in')
+      setRoommateState('typing')
+      setDialogueText('Eyes back on screen! Putting the clipboard away and resuming deep work.')
+    }
+  }, [focusMode])
+
+  // Allowed Tabs Management Callbacks
+  const handleAddInitialTab = (title: string, url: string) => {
+    if (isWhitelistLocked) return
+    const newTab: AllowedTab = {
+      id: `tab-${Date.now()}`,
+      title,
+      url,
+    }
+    setAllowedTabs((prev) => [...prev, newTab])
+  }
+
+  const handleRemoveInitialTab = (id: string) => {
+    if (isWhitelistLocked) return
+    setAllowedTabs((prev) => prev.filter((t) => t.id !== id && t.parentId !== id))
+  }
+
+  const handleExpandSubTab = (parentId: string, title: string, url: string) => {
+    const parent = allowedTabs.find((t) => t.id === parentId)
+    const subTab: AllowedTab = {
+      id: `sub-${Date.now()}`,
+      title,
+      url,
+      parentId,
+    }
+    setAllowedTabs((prev) => [...prev, subTab])
+    setActiveAllowedTabId(subTab.id)
+    authorizedSwitchUntilRef.current = Date.now() + 20000
+    setAuthorizedPassSecondsLeft(20)
+    appendLog(
+      'tab_whitelist',
+      `Expanded sub-tab "${title}" from allowed tab "${parent?.title ?? 'Root'}".`,
+      `"Branching "${title}" from "${parent?.title}"—approved under workspace tree."`
+    )
+  }
 
   // Physics loop for falling leaves landing on the studio floor
   useEffect(() => {
@@ -292,32 +445,25 @@ export function App() {
       setStats((prev) => {
         const delta = prev.speedMultiplier
 
-        // If in Locked-In Mode or Golden Comeback, accumulate focus & warm up studio
         if (focusMode === 'locked_in' || focusMode === 'golden_comeback') {
-          const newFocus = prev.focusSeconds + delta
-          const newUnbroken = prev.unbrokenFocusSeconds + delta
-          const newTemp = Math.min(24, prev.roomTempCelsius + 0.35 * delta)
-
           return {
             ...prev,
-            focusSeconds: newFocus,
-            unbrokenFocusSeconds: newUnbroken,
-            roomTempCelsius: newTemp,
+            focusSeconds: prev.focusSeconds + delta,
+            unbrokenFocusSeconds: prev.unbrokenFocusSeconds + delta,
+            roomTempCelsius: Math.min(24, prev.roomTempCelsius + 0.35 * delta),
           }
         }
 
-        // If in "The Last Leaf" Climax, track the 5-minute (300s) O. Henry Redemption timer!
         if (focusMode === 'last_leaf_climax') {
-          const nextComeback = prev.comebackProgressSeconds + delta * 6 // Scaled so user can experience the climax comeback smoothly
+          const nextComeback = prev.comebackProgressSeconds + delta * 6
           if (nextComeback >= 300) {
-            // O. HENRY TWIST UNLOCKED!
             setFocusMode('golden_comeback')
             setRoommateState('painting_golden_leaf')
             const quote = pickRandomDialogue('painting_golden_leaf')
             setDialogueText(quote)
             appendLog(
               'redemption',
-              'THE O. HENRY TWIST! Locked in for 5 straight minutes before the last leaf fell — Roommate painted a permanent Golden Leaf on the brick wall!',
+              'THE O. HENRY TWIST! Locked in for 5 straight minutes — Roommate painted a permanent Golden Leaf on the brick wall!',
               quote
             )
             return {
@@ -342,7 +488,7 @@ export function App() {
     return () => clearInterval(timer)
   }, [focusMode, appendLog])
 
-  // Unlock cozy studio upgrades & sprout new procedural leaves as focus time grows
+  // Unlock cozy studio upgrades automatically as focus time grows
   useEffect(() => {
     const focusMinutes = Math.floor(stats.focusSeconds / 60)
     setUpgrades((prev) => {
@@ -366,7 +512,6 @@ export function App() {
     })
   }, [stats.focusSeconds, appendLog])
 
-  // Action: Lock Back In (Resume Deep Work & Sprout a Leaf)
   const handleLockInAndSprout = () => {
     setFocusMode('locked_in')
     setRoommateState('typing')
@@ -375,7 +520,6 @@ export function App() {
     setVineGrowthProgress((p) => Math.min(1, p + 0.08))
 
     setLeaves((prev) => {
-      // Heal existing attached leaves and sprout a new emerald leaf + blossom
       const healed = prev.map((l) =>
         l.status === 'attached' || l.status === 'dying'
           ? { ...l, status: 'attached' as const, health: 1, hasBlossom: true }
@@ -421,12 +565,11 @@ export function App() {
 
     appendLog(
       'focus',
-      'Locked-In Focus Boost (+3m): Sunlight intensified, vine grew upward, and a new emerald leaf bloomed!',
+      'Locked-In Boost (+3m): Sunlight intensified, vine grew upward, and a new emerald leaf bloomed!',
       quote
     )
   }
 
-  // Action: Jump straight to "The Last Leaf" Climax (1 trembling leaf left in thunderstorm)
   const handleTriggerLastLeafClimax = () => {
     setFocusMode('last_leaf_climax')
     setRoommateState('dramatic_sickbed')
@@ -471,12 +614,11 @@ export function App() {
 
     appendLog(
       'climax',
-      'Entered "The Last Leaf" Climax: Thunderstorm hit the window! Only 1 trembling leaf remains on the vine.',
+      'Entered "The Last Leaf" Climax: Thunderstorm hit the window! Only 1 trembling leaf remains.',
       quote
     )
   }
 
-  // Action: Trigger O. Henry Golden Leaf Comeback immediately
   const handleTriggerGoldenLeafTwist = () => {
     setFocusMode('golden_comeback')
     setRoommateState('painting_golden_leaf')
@@ -492,12 +634,11 @@ export function App() {
 
     appendLog(
       'redemption',
-      'THE O. HENRY TWIST UNLOCKED! Roommate climbed out of bed in a beret and painted a permanent Golden Leaf on the brick wall!',
+      'THE O. HENRY TWIST! Roommate painted a permanent Golden Leaf on the brick wall!',
       quote
     )
   }
 
-  // Action: Sweep floor corpses clean
   const handleSweepFloor = () => {
     setRoommateState('sweeping_leaves')
     const quote = pickRandomDialogue('sweeping_leaves')
@@ -505,10 +646,9 @@ export function App() {
     setTimeout(() => {
       setLeaves((prev) => prev.filter((l) => l.status !== 'fallen'))
     }, 900)
-    appendLog('distraction', 'Roommate swept up the crispy dead leaves from the apartment floor.', quote)
+    appendLog('distraction', 'Roommate swept up the crispy dead leaves from the floor.', quote)
   }
 
-  // Action: Reset full studio
   const handleResetSession = () => {
     setFocusMode('locked_in')
     setRoommateState('typing')
@@ -521,6 +661,8 @@ export function App() {
       unbrokenFocusSeconds: 240,
       comebackProgressSeconds: 0,
       tabSwitches: 0,
+      authorizedTabSwitches: 0,
+      phoneAlerts: 0,
       leavesGrown: 6,
       leavesLost: 0,
       goldenLeavesPainted: 0,
@@ -537,247 +679,340 @@ export function App() {
     (l) => l.status === 'falling' || l.status === 'fallen'
   ).length
   const comebackProgress = Math.min(1, stats.comebackProgressSeconds / 300)
+  const unlockedUpgradesCount = upgrades.filter((u) => u.unlocked).length
 
   return (
-    <div className="min-h-screen bg-stone-950 text-stone-100">
-      {/* Top Navigation & Status Header */}
-      <header className="border-b border-stone-800/80 bg-stone-950/90 backdrop-blur-md">
-        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-4 py-3.5 sm:px-6">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 shadow-inner">
-              <Leaf className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="font-serif text-xl font-bold tracking-tight text-stone-100">
-                  Leaf Me Alone
-                </h1>
-                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wider text-amber-300">
-                  The Last Leaf × Desk Tamagotchi
-                </span>
-              </div>
-              <p className="font-mono text-xs text-stone-400">
-                Melodramatic focus roommate &amp; mathematical ivy whose survival depends on your attention span
-              </p>
-            </div>
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-stone-950 text-stone-100 select-none">
+      {/* 1. COMPACT TOP HEADER BAR (No scroll, everything accessible in 1 click) */}
+      <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-stone-800 bg-stone-950 px-3">
+        {/* Brand + Anchor Task */}
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/15 text-emerald-400">
+            <Leaf className="h-4 w-4" />
           </div>
+          <span className="font-serif text-sm font-bold tracking-tight text-stone-100 shrink-0">
+            Leaf Me Alone
+          </span>
 
-          <div className="flex flex-wrap items-center gap-2.5">
-            {/* Real Tab-Switch Detection Toggle */}
-            <button
-              onClick={() => setRealTabDetectionEnabled((v) => !v)}
-              className={`flex items-center gap-2 rounded-xl border px-3 py-2 font-mono text-xs font-semibold transition ${
-                realTabDetectionEnabled
-                  ? 'border-emerald-500/40 bg-emerald-950/50 text-emerald-300'
-                  : 'border-stone-700 bg-stone-900 text-stone-400'
-              }`}
-              title="When enabled, switching to another browser tab automatically triggers Distraction Mode"
-            >
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  realTabDetectionEnabled ? 'animate-pulse bg-emerald-400' : 'bg-stone-500'
-                }`}
-              />
-              Tab-Switch Sensor: {realTabDetectionEnabled ? 'ARMED' : 'PAUSED'}
-            </button>
-
-            {/* Compact Corner Companion Mode Toggle */}
-            <button
-              onClick={() => setIsCompactCornerMode((v) => !v)}
-              className="flex items-center gap-1.5 rounded-xl border border-stone-700 bg-stone-900 px-3 py-2 font-mono text-xs font-semibold text-stone-300 hover:bg-stone-800"
-            >
-              {isCompactCornerMode ? (
-                <>
-                  <Maximize2 className="h-3.5 w-3.5 text-emerald-400" />
-                  Expand Full Studio
-                </>
-              ) : (
-                <>
-                  <Minimize2 className="h-3.5 w-3.5 text-amber-400" />
-                  Corner Companion Mode
-                </>
-              )}
-            </button>
-
-            {/* Export Daily Lease Inspection Polaroid Button */}
-            <button
-              onClick={() => setIsPolaroidOpen(true)}
-              className="flex items-center gap-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 px-4 py-2 font-mono text-xs font-bold text-white shadow-lg shadow-emerald-950/60 hover:from-emerald-500 hover:to-teal-500"
-            >
-              <Camera className="h-4 w-4" />
-              Daily Lease Inspection Card
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content Layout */}
-      <main
-        className={`mx-auto px-4 py-6 sm:px-6 ${
-          isCompactCornerMode ? 'max-w-xl' : 'max-w-7xl'
-        }`}
-      >
-        {/* Active Anchor Task Bar */}
-        <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-stone-800 bg-stone-900/70 px-4 py-3">
-          <div className="flex flex-1 items-center gap-3 min-w-[260px]">
-            <span className="font-mono text-xs font-bold uppercase tracking-wider text-emerald-400">
-              Anchor Task:
+          <div className="hidden sm:flex items-center gap-1.5 rounded-lg border border-stone-800 bg-stone-900/90 px-2 py-1">
+            <span className="font-mono text-[10px] font-bold uppercase text-emerald-400">
+              Task:
             </span>
             <input
               type="text"
               value={stats.currentTask}
               onChange={(e) => setStats((s) => ({ ...s, currentTask: e.target.value }))}
-              className="w-full max-w-md rounded-lg border border-stone-700 bg-stone-950 px-3 py-1.5 font-mono text-xs text-stone-100 focus:border-emerald-500 focus:outline-none"
-              placeholder="What are you locking in on right now?"
+              className="w-36 bg-transparent font-mono text-[11px] text-stone-100 focus:outline-none"
             />
-          </div>
-
-          <div className="flex flex-wrap items-center gap-4 font-mono text-xs">
-            <div className="flex items-center gap-1.5 text-emerald-400">
-              <Play className="h-3.5 w-3.5" />
-              <span>Focus: {Math.floor(stats.focusSeconds / 60)}m {stats.focusSeconds % 60}s</span>
-            </div>
-            <div className="flex items-center gap-1.5 text-rose-400">
-              <EyeOff className="h-3.5 w-3.5" />
-              <span>Tab Switches: {stats.tabSwitches}</span>
-            </div>
-            <div className="flex items-center gap-1.5 text-amber-300">
-              <Award className="h-3.5 w-3.5" />
-              <span>Golden Leaves: {stats.goldenLeavesPainted}</span>
-            </div>
           </div>
         </div>
 
-        <div
-          className={`grid gap-6 ${
-            isCompactCornerMode ? 'grid-cols-1' : 'grid-cols-1 lg:grid-cols-12'
-          }`}
-        >
-          {/* LEFT / MAIN COLUMN: Interactive Procedural Studio Canvas + Simulation Deck */}
-          <div className={isCompactCornerMode ? 'col-span-1' : 'lg:col-span-8 space-y-5'}>
-            <StudioCanvas
-              focusMode={focusMode}
-              roommateState={roommateState}
-              leaves={leaves}
-              vineSegments={vineSegments}
-              vineGrowthProgress={vineGrowthProgress}
-              upgrades={upgrades}
-              daysSinceDoomscroll={daysSinceDoomscroll}
-              goldenLeavesPainted={stats.goldenLeavesPainted}
-              roomTempCelsius={stats.roomTempCelsius}
-              comebackProgress={comebackProgress}
-              dialogueText={dialogueText}
-              canvasRef={studioCanvasRef}
-            />
+        {/* Compact Live Telemetry Pills */}
+        <div className="hidden md:flex items-center gap-3 font-mono text-[11px]">
+          <span className="flex items-center gap-1 text-emerald-400">
+            <Play className="h-3 w-3" />
+            {Math.floor(stats.focusSeconds / 60)}m {stats.focusSeconds % 60}s
+          </span>
+          <span
+            className="flex items-center gap-1 text-teal-300"
+            title="Authorized switches to your whitelisted tabs"
+          >
+            <ShieldCheck className="h-3 w-3" />
+            Allowed: {stats.authorizedTabSwitches}
+          </span>
+          <span
+            className="flex items-center gap-1 text-rose-400"
+            title="Unauthorized tab switches & phone glances"
+          >
+            <EyeOff className="h-3 w-3" />
+            Violations: {stats.tabSwitches + stats.phoneAlerts}
+          </span>
+          <span className="flex items-center gap-1 text-amber-300">
+            <Award className="h-3 w-3" />
+            Gold: {stats.goldenLeavesPainted}
+          </span>
+        </div>
 
-            {/* Interactive Director / Simulation Deck (Test all 3 acts & 6 character states in 1 click) */}
-            <div className="rounded-2xl border border-stone-800 bg-stone-900/80 p-4 shadow-xl">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <h2 className="font-mono text-xs font-bold uppercase tracking-wider text-stone-300">
-                    Real-Time Reaction Deck &amp; Story Simulator
-                  </h2>
-                  <p className="font-mono text-[11px] text-stone-400">
-                    Switch to another browser tab to trigger real detection, or test any phase &amp; roommate state below:
-                  </p>
+        {/* Expandable Section Menu Buttons */}
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => togglePanel('tabs')}
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-semibold transition ${
+              activePanel === 'tabs'
+                ? 'border-emerald-500 bg-emerald-500/20 text-emerald-200'
+                : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
+            }`}
+          >
+            <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+            <span>Tabs ({allowedTabs.length})</span>
+            {activePanel === 'tabs' ? (
+              <ChevronUp className="h-3 w-3" />
+            ) : (
+              <ChevronDown className="h-3 w-3" />
+            )}
+          </button>
+
+          <button
+            onClick={() => togglePanel('upgrades')}
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-semibold transition ${
+              activePanel === 'upgrades'
+                ? 'border-amber-500 bg-amber-500/20 text-amber-200'
+                : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
+            }`}
+          >
+            <Layers className="h-3.5 w-3.5 text-amber-400" />
+            <span>Room ({unlockedUpgradesCount}/5)</span>
+          </button>
+
+          <button
+            onClick={() => togglePanel('simulator')}
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-semibold transition ${
+              activePanel === 'simulator'
+                ? 'border-purple-500 bg-purple-500/20 text-purple-200'
+                : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
+            }`}
+          >
+            <Sliders className="h-3.5 w-3.5 text-purple-400" />
+            <span className="hidden sm:inline">States</span>
+          </button>
+
+          <button
+            onClick={() => togglePanel('log')}
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-semibold transition ${
+              activePanel === 'log'
+                ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
+            }`}
+          >
+            <ClipboardList className="h-3.5 w-3.5 text-rose-400" />
+            <span className="hidden sm:inline">Log</span>
+          </button>
+
+          <button
+            onClick={() => setIsPolaroidOpen(true)}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1 font-mono text-[11px] font-bold text-white hover:bg-emerald-500"
+          >
+            <Camera className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Polaroid</span>
+          </button>
+        </div>
+      </header>
+
+      {/* 2. WHITELISTED TABS QUICK-SWITCH BAR (Click an allowed tab to switch or expand sub-tabs) */}
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-stone-800/80 bg-stone-900/60 px-3 overflow-x-auto">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-stone-400 shrink-0">
+            {isWhitelistLocked ? '🔒 Allowed Tabs:' : '🔓 Initial Tabs:'}
+          </span>
+
+          {allowedTabs.map((tab) => {
+            const isSelected = activeAllowedTabId === tab.id
+            return (
+              <button
+                key={tab.id}
+                onClick={() => handleSwitchToAllowedTab(tab)}
+                className={`flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[10.5px] font-medium transition shrink-0 ${
+                  isSelected
+                    ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-200'
+                    : 'border-stone-800 bg-stone-950 text-stone-300 hover:border-stone-700'
+                }`}
+                title="Click to authorize switching to this allowed tab"
+              >
+                {tab.parentId && <GitBranch className="h-2.5 w-2.5 text-teal-400" />}
+                <span>{tab.title}</span>
+                {isSelected && <Check className="h-2.5 w-2.5 text-emerald-400" />}
+              </button>
+            )
+          })}
+
+          <button
+            onClick={() => setActivePanel('tabs')}
+            className="flex items-center gap-1 rounded-md border border-dashed border-stone-700 px-2 py-0.5 font-mono text-[10px] text-stone-400 hover:border-emerald-500/50 hover:text-emerald-300 shrink-0"
+          >
+            <Plus className="h-2.5 w-2.5" />
+            {isWhitelistLocked ? 'Expand from Tab' : 'Configure / Lock'}
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0 font-mono text-[10px]">
+          {authorizedPassSecondsLeft > 0 ? (
+            <span className="rounded bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 font-bold text-emerald-300">
+              Safe Tab Switch Pass: {authorizedPassSecondsLeft}s
+            </span>
+          ) : (
+            <span className="text-stone-400 hidden lg:inline">
+              Unapproved tab switches = instant leaf casualty
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* 3. MAIN CENTER STAGE (Fits remaining viewport height with 0 scrolling) */}
+      <main className="relative flex flex-1 min-h-0 w-full items-center justify-center p-2.5 overflow-hidden">
+        {/* Studio Canvas fills available space proportionally */}
+        <div className="h-full w-full max-w-5xl">
+          <StudioCanvas
+            focusMode={focusMode}
+            roommateState={roommateState}
+            leaves={leaves}
+            vineSegments={vineSegments}
+            vineGrowthProgress={vineGrowthProgress}
+            upgrades={upgrades}
+            daysSinceDoomscroll={daysSinceDoomscroll}
+            goldenLeavesPainted={stats.goldenLeavesPainted}
+            roomTempCelsius={stats.roomTempCelsius}
+            comebackProgress={comebackProgress}
+            dialogueText={dialogueText}
+            canvasRef={studioCanvasRef}
+          />
+        </div>
+
+        {/* FLOATING LIVE WEBCAM GUARD (Bottom-Left Corner — collapsible pill or live PiP monitor) */}
+        <div className="absolute bottom-4 left-4 z-20 max-w-xs">
+          {isWebcamExpanded ? (
+            <div className="relative shadow-2xl">
+              <button
+                onClick={() => setIsWebcamExpanded(false)}
+                className="absolute -top-2 -right-2 z-30 flex h-5 w-5 items-center justify-center rounded-full border border-stone-700 bg-stone-900 text-stone-400 hover:text-white"
+                title="Minimize Webcam HUD to pill"
+              >
+                <ChevronDown className="h-3 w-3" />
+              </button>
+              <WebcamGuard
+                enabled={webcamEnabled}
+                onToggleEnabled={() => setWebcamEnabled((v) => !v)}
+                status={cameraStatus}
+                onStatusChange={setCameraStatus}
+                onPhoneDetected={handlePhoneDetected}
+                onAwayDetected={handleAwayDetected}
+                onBackFocused={handleCameraBackFocused}
+                compact
+              />
+            </div>
+          ) : (
+            <button
+              onClick={() => setIsWebcamExpanded(true)}
+              className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 font-mono text-xs font-bold shadow-xl backdrop-blur-md transition ${
+                cameraStatus === 'phone_detected'
+                  ? 'border-rose-500 bg-rose-950/90 text-rose-200 animate-pulse'
+                  : cameraStatus === 'away_detected'
+                  ? 'border-amber-500 bg-amber-950/90 text-amber-200 animate-pulse'
+                  : 'border-stone-700 bg-stone-900/90 text-emerald-300'
+              }`}
+            >
+              <Video className="h-3.5 w-3.5" />
+              <span>
+                Cam Guard:{' '}
+                {cameraStatus === 'phone_detected'
+                  ? 'PHONE DETECTED!'
+                  : cameraStatus === 'away_detected'
+                  ? 'AWAY FROM DESK!'
+                  : webcamEnabled
+                  ? 'LOCKED IN'
+                  : 'OFF'}
+              </span>
+              <ChevronUp className="h-3 w-3" />
+            </button>
+          )}
+        </div>
+
+        {/* EXPANDABLE OVERLAY DRAWERS (Top-Right over Studio — zero page scroll) */}
+        {activePanel && (
+          <div className="absolute top-3 right-3 z-30 w-full max-w-sm rounded-2xl border border-stone-700 bg-stone-900/95 p-3 shadow-2xl backdrop-blur-md">
+            <div className="mb-2 flex items-center justify-between border-b border-stone-800 pb-1.5">
+              <span className="font-mono text-xs font-bold uppercase tracking-wider text-emerald-400">
+                {activePanel === 'tabs' && 'Allowed Tabs & Branch Expansion'}
+                {activePanel === 'upgrades' && 'Cozy Studio Upgrades (5)'}
+                {activePanel === 'simulator' && 'Roommate State & Story Inspector'}
+                {activePanel === 'log' && "Roommate's Clipboard Review Log"}
+              </span>
+              <button
+                onClick={() => setActivePanel(null)}
+                className="rounded-md p-1 text-stone-400 hover:bg-stone-800 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {activePanel === 'tabs' && (
+              <AllowedTabsManager
+                allowedTabs={allowedTabs}
+                isWhitelistLocked={isWhitelistLocked}
+                activeAllowedTabId={activeAllowedTabId}
+                onLockWhitelist={() => {
+                  setIsWhitelistLocked(true)
+                  appendLog(
+                    'tab_whitelist',
+                    `Locked initial whitelist with ${allowedTabs.length} root tabs. Only sub-tab expansions allowed now!`
+                  )
+                }}
+                onUnlockWhitelistReset={() => setIsWhitelistLocked(false)}
+                onAddInitialTab={handleAddInitialTab}
+                onRemoveInitialTab={handleRemoveInitialTab}
+                onExpandSubTab={handleExpandSubTab}
+                onSwitchToAllowedTab={handleSwitchToAllowedTab}
+                onTriggerUnauthorizedTab={() =>
+                  triggerDistraction('Opened an UNAPPROVED new tab outside whitelist!')
+                }
+              />
+            )}
+
+            {activePanel === 'upgrades' && (
+              <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
+                <div className="flex items-center justify-between pb-1">
+                  <span className="font-mono text-[10.5px] text-stone-400">
+                    Click any item to toggle or unlock via focus time:
+                  </span>
+                  <button
+                    onClick={() =>
+                      setUpgrades((prev) => prev.map((u) => ({ ...u, unlocked: true })))
+                    }
+                    className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-300"
+                  >
+                    Unlock All
+                  </button>
                 </div>
-                <button
-                  onClick={() =>
-                    setStats((s) => ({
-                      ...s,
-                      speedMultiplier: s.speedMultiplier === 1 ? 15 : 1,
-                    }))
-                  }
-                  className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-bold transition ${
-                    stats.speedMultiplier > 1
-                      ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
-                      : 'border-stone-700 bg-stone-800 text-stone-400 hover:text-stone-200'
-                  }`}
-                >
-                  <FastForward className="h-3.5 w-3.5" />
-                  Time Speed: {stats.speedMultiplier}x
-                </button>
+                {upgrades.map((u) => (
+                  <div
+                    key={u.id}
+                    onClick={() =>
+                      setUpgrades((prev) =>
+                        prev.map((item) =>
+                          item.id === u.id ? { ...item, unlocked: !item.unlocked } : item
+                        )
+                      )
+                    }
+                    className={`flex cursor-pointer items-center justify-between rounded-lg border p-2 transition ${
+                      u.unlocked
+                        ? 'border-emerald-500/40 bg-emerald-950/30 text-stone-100'
+                        : 'border-stone-800 bg-stone-950/60 text-stone-500'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs font-bold text-emerald-400">
+                        {u.unlocked ? '✓' : `${u.unlockMinutes}m`}
+                      </span>
+                      <div>
+                        <div className="font-mono text-[11px] font-bold">{u.name}</div>
+                        <div className="font-mono text-[9.5px] text-stone-400">
+                          {u.description}
+                        </div>
+                      </div>
+                    </div>
+                    <span className="font-mono text-[9.5px] uppercase">
+                      {u.unlocked ? 'On' : 'Locked'}
+                    </span>
+                  </div>
+                ))}
               </div>
+            )}
 
-              {/* Primary 4 Story Phase Triggers */}
-              <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
-                <button
-                  onClick={handleLockInAndSprout}
-                  className="flex flex-col items-start gap-1 rounded-xl border border-emerald-500/30 bg-emerald-950/40 p-3 text-left transition hover:border-emerald-400 hover:bg-emerald-900/50"
-                >
-                  <div className="flex items-center gap-1.5 font-mono text-xs font-bold text-emerald-300">
-                    <Sun className="h-4 w-4" />
-                    1. Locked-In Boost
-                  </div>
-                  <span className="font-mono text-[11px] text-stone-300">
-                    Sunlight rays + sprout emerald leaf &amp; unlock room upgrades
-                  </span>
-                </button>
-
-                <button
-                  onClick={() => triggerDistraction('Simulated Tab-Switch Spree (Reddit/X)')}
-                  className="flex flex-col items-start gap-1 rounded-xl border border-orange-500/30 bg-orange-950/40 p-3 text-left transition hover:border-orange-400 hover:bg-orange-900/50"
-                >
-                  <div className="flex items-center gap-1.5 font-mono text-xs font-bold text-orange-300">
-                    <ThermometerSnowflake className="h-4 w-4" />
-                    2. Drift Off / Tab Hop
-                  </div>
-                  <span className="font-mono text-[11px] text-stone-300">
-                    Frost creeps in, newest leaf dies &amp; falls, clipboard review
-                  </span>
-                </button>
-
-                <button
-                  onClick={handleTriggerLastLeafClimax}
-                  className="flex flex-col items-start gap-1 rounded-xl border border-rose-500/30 bg-rose-950/40 p-3 text-left transition hover:border-rose-400 hover:bg-rose-900/50"
-                >
-                  <div className="flex items-center gap-1.5 font-mono text-xs font-bold text-rose-300">
-                    <ShieldAlert className="h-4 w-4" />
-                    3. "The Last Leaf" Climax
-                  </div>
-                  <span className="font-mono text-[11px] text-stone-300">
-                    Thunderstorm + 1 trembling leaf + Victorian sickbed drama
-                  </span>
-                </button>
-
-                <button
-                  onClick={handleTriggerGoldenLeafTwist}
-                  className="flex flex-col items-start gap-1 rounded-xl border border-yellow-500/40 bg-yellow-950/40 p-3 text-left transition hover:border-yellow-400 hover:bg-yellow-900/50"
-                >
-                  <div className="flex items-center gap-1.5 font-mono text-xs font-bold text-yellow-300">
-                    <Sparkles className="h-4 w-4" />
-                    4. O. Henry Twist!
-                  </div>
-                  <span className="font-mono text-[11px] text-stone-300">
-                    Beret + paints permanent Golden Leaf onto the brick wall
-                  </span>
-                </button>
-              </div>
-
-              {/* Direct 6 Character State Switcher */}
-              <div className="mt-3.5 border-t border-stone-800 pt-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="font-mono text-[11px] font-semibold uppercase tracking-wider text-stone-400">
-                    Direct Roommate State Inspector (6 States):
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={handleSweepFloor}
-                      className="rounded-md border border-stone-700 bg-stone-800 px-2 py-0.5 font-mono text-[10px] text-stone-300 hover:bg-stone-700"
-                    >
-                      Sweep Floor Leaves ({fallenLeavesCount})
-                    </button>
-                    <button
-                      onClick={handleResetSession}
-                      className="flex items-center gap-1 rounded-md border border-stone-700 bg-stone-800 px-2 py-0.5 font-mono text-[10px] text-stone-300 hover:bg-stone-700"
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      Reset Studio
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-1.5">
+            {activePanel === 'simulator' && (
+              <div className="space-y-2.5 font-mono text-xs">
+                <p className="text-[10.5px] text-stone-400">
+                  Inspect any of the 6 character states or studio maintenance actions:
+                </p>
+                <div className="grid grid-cols-2 gap-1.5">
                   {(
                     [
                       'typing',
@@ -798,191 +1033,125 @@ export function App() {
                         else if (st === 'typing') setFocusMode('locked_in')
                         else setFocusMode('distracted')
                       }}
-                      className={`rounded-lg border px-2.5 py-1.5 font-mono text-[11px] font-medium transition ${
+                      className={`rounded-lg border px-2 py-1.5 text-left text-[10px] font-semibold transition ${
                         roommateState === st
                           ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200'
-                          : 'border-stone-800 bg-stone-950 text-stone-400 hover:border-stone-700 hover:text-stone-200'
+                          : 'border-stone-800 bg-stone-950 text-stone-400 hover:text-stone-200'
                       }`}
                     >
                       {st}
                     </button>
                   ))}
                 </div>
-              </div>
-            </div>
-          </div>
-
-          {/* RIGHT COLUMN: Cozy Apartment Upgrades + Passive-Aggressive Performance Log */}
-          {!isCompactCornerMode && (
-            <div className="lg:col-span-4 space-y-5">
-              {/* Botanical & Apartment Telemetry Card */}
-              <div className="rounded-2xl border border-stone-800 bg-stone-900/80 p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-emerald-400">
-                    Botanical &amp; Room Telemetry
-                  </h3>
-                  <span className="rounded-md bg-stone-800 px-2 py-0.5 font-mono text-[11px] text-stone-300">
-                    {stats.roomTempCelsius.toFixed(0)}°C Studio
-                  </span>
-                </div>
-
-                <div className="grid grid-cols-3 gap-2.5 text-center">
-                  <div className="rounded-xl border border-stone-800 bg-stone-950/80 p-2.5">
-                    <div className="font-mono text-xl font-extrabold text-emerald-400">
-                      {attachedLeavesCount}
-                    </div>
-                    <div className="font-mono text-[10px] uppercase text-stone-400">
-                      Live Leaves
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-stone-800 bg-stone-950/80 p-2.5">
-                    <div className="font-mono text-xl font-extrabold text-orange-400">
-                      {fallenLeavesCount}
-                    </div>
-                    <div className="font-mono text-[10px] uppercase text-stone-400">
-                      Floor Corpses
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-stone-800 bg-stone-950/80 p-2.5">
-                    <div className="font-mono text-xl font-extrabold text-yellow-400">
-                      {stats.goldenLeavesPainted}
-                    </div>
-                    <div className="font-mono text-[10px] uppercase text-stone-400">
-                      Golden Leaves
-                    </div>
-                  </div>
-                </div>
-
-                {/* O. Henry Redemption Meter when in Last Leaf Climax */}
-                {focusMode === 'last_leaf_climax' && (
-                  <div className="mt-3 rounded-xl border border-yellow-500/40 bg-yellow-950/30 p-3">
-                    <div className="flex items-center justify-between font-mono text-xs font-bold text-yellow-300">
-                      <span>O. Henry Redemption Streak</span>
-                      <span>{Math.round(comebackProgress * 100)}%</span>
-                    </div>
-                    <div className="mt-1.5 h-2 w-full overflow-hidden rounded-full bg-stone-800">
-                      <div
-                        className="h-full bg-gradient-to-r from-amber-500 to-yellow-300 transition-all duration-300"
-                        style={{ width: `${Math.round(comebackProgress * 100)}%` }}
-                      />
-                    </div>
-                    <p className="mt-1.5 font-mono text-[11px] text-yellow-200/80">
-                      Stay on this tab to paint the permanent Golden Leaf onto the brick wall!
-                    </p>
-                  </div>
-                )}
-              </div>
-
-              {/* Cozy Apartment Upgrades (Unlocks with Focus Time) */}
-              <div className="rounded-2xl border border-stone-800 bg-stone-900/80 p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <div>
-                    <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-amber-400">
-                      Cozy Studio Upgrades
-                    </h3>
-                    <p className="font-mono text-[11px] text-stone-400">
-                      Unlocks automatically as unbroken focus accumulates
-                    </p>
-                  </div>
+                <div className="flex items-center justify-between border-t border-stone-800 pt-2">
                   <button
-                    onClick={() =>
-                      setUpgrades((prev) => prev.map((u) => ({ ...u, unlocked: true })))
-                    }
-                    className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 font-mono text-[10px] font-semibold text-amber-300 hover:bg-amber-500/20"
+                    onClick={handleSweepFloor}
+                    className="rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10.5px] text-stone-200 hover:bg-stone-700"
                   >
-                    Unlock All
+                    Sweep Floor ({fallenLeavesCount})
+                  </button>
+                  <button
+                    onClick={handleResetSession}
+                    className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10.5px] text-stone-200 hover:bg-stone-700"
+                  >
+                    <RotateCcw className="h-3 w-3" /> Reset Studio
                   </button>
                 </div>
+              </div>
+            )}
 
-                <div className="space-y-2">
-                  {upgrades.map((u) => (
-                    <div
-                      key={u.id}
-                      onClick={() =>
-                        setUpgrades((prev) =>
-                          prev.map((item) =>
-                            item.id === u.id ? { ...item, unlocked: !item.unlocked } : item
-                          )
-                        )
-                      }
-                      className={`flex cursor-pointer items-center justify-between rounded-xl border p-2.5 transition ${
-                        u.unlocked
-                          ? 'border-emerald-500/40 bg-emerald-950/30 text-stone-100'
-                          : 'border-stone-800 bg-stone-950/60 text-stone-500 hover:border-stone-700'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5">
-                        <div
-                          className={`flex h-7 w-7 items-center justify-center rounded-lg font-mono text-xs font-bold ${
-                            u.unlocked
-                              ? 'bg-emerald-500/20 text-emerald-300'
-                              : 'bg-stone-800 text-stone-500'
-                          }`}
-                        >
-                          {u.unlocked ? '✓' : `${u.unlockMinutes}m`}
-                        </div>
-                        <div>
-                          <div className="font-mono text-xs font-bold">{u.name}</div>
-                          <div className="font-mono text-[10px] text-stone-400">
-                            {u.description}
-                          </div>
-                        </div>
-                      </div>
-                      <span className="font-mono text-[10px] font-semibold uppercase">
-                        {u.unlocked ? 'Active' : 'Locked'}
+            {activePanel === 'log' && (
+              <div className="max-h-64 space-y-2 overflow-y-auto pr-1 font-mono text-xs">
+                {activityLog.map((item) => (
+                  <div
+                    key={item.id}
+                    className="rounded-lg border border-stone-800 bg-stone-950 p-2"
+                  >
+                    <div className="flex items-center justify-between text-[9.5px] text-stone-500">
+                      <span className="font-bold uppercase text-emerald-400">
+                        {item.type}
                       </span>
+                      <span>{item.timestamp}</span>
                     </div>
-                  ))}
-                </div>
+                    <p className="mt-0.5 text-[10.5px] text-stone-200">{item.message}</p>
+                    {item.quote && (
+                      <p className="mt-0.5 italic text-[10px] text-stone-400">
+                        {item.quote}
+                      </p>
+                    )}
+                  </div>
+                ))}
               </div>
-
-              {/* Roommate's Passive-Aggressive Clipboard Log */}
-              <div className="rounded-2xl border border-stone-800 bg-stone-900/80 p-4">
-                <div className="mb-3 flex items-center gap-2">
-                  <ClipboardList className="h-4 w-4 text-rose-400" />
-                  <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-stone-200">
-                    Roommate&apos;s Clipboard Log
-                  </h3>
-                </div>
-
-                <div className="max-h-60 space-y-2.5 overflow-y-auto pr-1">
-                  {activityLog.map((item) => (
-                    <div
-                      key={item.id}
-                      className="rounded-xl border border-stone-800/90 bg-stone-950/90 p-2.5 font-mono text-xs"
-                    >
-                      <div className="flex items-center justify-between text-[10px] text-stone-500">
-                        <span
-                          className={`font-bold uppercase ${
-                            item.type === 'focus'
-                              ? 'text-emerald-400'
-                              : item.type === 'redemption'
-                              ? 'text-yellow-400'
-                              : item.type === 'climax'
-                              ? 'text-rose-400'
-                              : item.type === 'upgrade'
-                              ? 'text-amber-400'
-                              : 'text-orange-400'
-                          }`}
-                        >
-                          {item.type}
-                        </span>
-                        <span>{item.timestamp}</span>
-                      </div>
-                      <p className="mt-1 text-[11px] text-stone-200">{item.message}</p>
-                      {item.quote && (
-                        <p className="mt-1 border-l-2 border-stone-700 pl-2 italic text-[11px] text-stone-400">
-                          {item.quote}
-                        </p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </main>
+
+      {/* 4. COMPACT BOTTOM QUICK-ACTION DOCK (1-click story triggers & speed toggle) */}
+      <footer className="flex h-12 shrink-0 items-center justify-between gap-2 border-t border-stone-800 bg-stone-950 px-3 overflow-x-auto">
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button
+            onClick={handleLockInAndSprout}
+            className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-emerald-300 hover:bg-emerald-900/60"
+          >
+            <Sun className="h-3.5 w-3.5" />
+            <span>1. Lock-In (+Leaf)</span>
+          </button>
+
+          <button
+            onClick={() =>
+              triggerDistraction('Opened an unapproved tab outside your initial whitelist')
+            }
+            className="flex items-center gap-1.5 rounded-lg border border-orange-500/40 bg-orange-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-orange-300 hover:bg-orange-900/60"
+          >
+            <ThermometerSnowflake className="h-3.5 w-3.5" />
+            <span>2. Unapproved Tab</span>
+          </button>
+
+          <button
+            onClick={handlePhoneDetected}
+            className="flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-rose-300 hover:bg-rose-900/60"
+          >
+            <Smartphone className="h-3.5 w-3.5" />
+            <span>Phone Glance</span>
+          </button>
+
+          <button
+            onClick={handleTriggerLastLeafClimax}
+            className="flex items-center gap-1.5 rounded-lg border border-purple-500/40 bg-purple-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-purple-300 hover:bg-purple-900/60"
+          >
+            <ShieldAlert className="h-3.5 w-3.5" />
+            <span>3. Last Leaf Climax</span>
+          </button>
+
+          <button
+            onClick={handleTriggerGoldenLeafTwist}
+            className="flex items-center gap-1.5 rounded-lg border border-yellow-500/40 bg-yellow-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-yellow-300 hover:bg-yellow-900/60"
+          >
+            <Sparkles className="h-3.5 w-3.5" />
+            <span>4. O. Henry Twist</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            onClick={() =>
+              setStats((s) => ({
+                ...s,
+                speedMultiplier: s.speedMultiplier === 1 ? 15 : 1,
+              }))
+            }
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-bold transition ${
+              stats.speedMultiplier > 1
+                ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
+                : 'border-stone-800 bg-stone-900 text-stone-400 hover:text-stone-200'
+            }`}
+          >
+            <FastForward className="h-3 w-3" />
+            <span>{stats.speedMultiplier}x Speed</span>
+          </button>
+        </div>
+      </footer>
 
       {/* Shareable Polaroid / Specimen Card Modal */}
       <PolaroidModal
@@ -997,4 +1166,5 @@ export function App() {
     </div>
   )
 }
+
 export default App

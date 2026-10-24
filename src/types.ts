@@ -8,6 +8,22 @@ export type RoommateState =
 
 export type FocusMode = 'locked_in' | 'distracted' | 'last_leaf_climax' | 'golden_comeback'
 
+export type CameraStatus =
+  | 'off'
+  | 'initializing'
+  | 'focused'
+  | 'phone_detected'
+  | 'away_detected'
+  | 'permission_denied'
+
+export interface AllowedTab {
+  id: string
+  title: string
+  url: string
+  parentId?: string // If expanded from an initial allowed tab
+  isActive?: boolean
+}
+
 export interface LeafNode {
   id: number
   segmentIndex: number
@@ -54,7 +70,7 @@ export interface RoomUpgrade {
 export interface ActivityLogItem {
   id: string
   timestamp: string
-  type: 'focus' | 'distraction' | 'climax' | 'upgrade' | 'redemption'
+  type: 'focus' | 'distraction' | 'climax' | 'upgrade' | 'redemption' | 'camera' | 'tab_whitelist'
   message: string
   quote?: string
 }
@@ -62,12 +78,14 @@ export interface ActivityLogItem {
 export interface SessionStats {
   focusSeconds: number
   unbrokenFocusSeconds: number
-  comebackProgressSeconds: number // 0 to 300s (or accelerated in demo) for O. Henry twist
+  comebackProgressSeconds: number
   tabSwitches: number
+  authorizedTabSwitches: number
+  phoneAlerts: number
   leavesGrown: number
   leavesLost: number
   goldenLeavesPainted: number
   roomTempCelsius: number
   currentTask: string
-  speedMultiplier: number // 1x real time, or 15x fast-forward for testing/demo
+  speedMultiplier: number
 }
