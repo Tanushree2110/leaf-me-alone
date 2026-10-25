@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef } from 'react'
 import { CameraOff, RefreshCw } from 'lucide-react'
-import { FaceDetector, FilesetResolver } from '@mediapipe/tasks-vision'
+import { FaceDetector, FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision'
 import { CameraStatus } from '../types'
 
 interface WebcamGuardProps {
@@ -23,8 +23,9 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const mpDetectorRef = useRef<FaceDetector | null>(null)
-  const mpReadyRef = useRef<boolean>(false)
+  const segmenterRef = useRef<ImageSegmenter | null>(null)
+  const faceDetectorRef = useRef<FaceDetector | null>(null)
+  const modelsReadyRef = useRef<boolean>(false)
   const lastTimestampMsRef = useRef<number>(0)
 
   const hasTriggeredForCurrentAbsenceRef = useRef<boolean>(false)
@@ -45,33 +46,48 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [status, onStatusChange, onAwayDetected, onBackFocused])
 
-  // Initialize local MediaPipe Neural FaceDetector from /wasm and /models
+  // Initialize BOTH MediaPipe SelfieSegmenter (detects a human person/body at any angle)
+  // AND MediaPipe FaceDetector from local /wasm and /models
   useEffect(() => {
     let cancelled = false
     async function initMediaPipe() {
       try {
         const vision = await FilesetResolver.forVisionTasks('/wasm')
         if (cancelled) return
-        const detector = await FaceDetector.createFromOptions(vision, {
-          baseOptions: {
-            modelAssetPath: '/models/blaze_face_short_range.tflite',
-          },
-          runningMode: 'VIDEO',
-          minDetectionConfidence: 0.28,
-        })
+
+        const [segmenter, faceDetector] = await Promise.all([
+          ImageSegmenter.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: '/models/selfie_segmenter.tflite',
+            },
+            runningMode: 'VIDEO',
+            outputCategoryMask: true,
+            outputConfidenceMasks: true,
+          }).catch(() => null),
+          FaceDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: '/models/blaze_face_short_range.tflite',
+            },
+            runningMode: 'VIDEO',
+            minDetectionConfidence: 0.25,
+          }).catch(() => null),
+        ])
+
         if (!cancelled) {
-          mpDetectorRef.current = detector
-          mpReadyRef.current = true
+          segmenterRef.current = segmenter
+          faceDetectorRef.current = faceDetector
+          modelsReadyRef.current = Boolean(segmenter || faceDetector)
         }
       } catch {
-        mpReadyRef.current = false
+        modelsReadyRef.current = false
       }
     }
     initMediaPipe()
     return () => {
       cancelled = true
       try {
-        mpDetectorRef.current?.close()
+        segmenterRef.current?.close()
+        faceDetectorRef.current?.close()
       } catch {}
     }
   }, [])
@@ -122,14 +138,13 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [enabled, startCamera, stopCamera])
 
-  // Real-time Neural Face Presence Loop
+  // Real-time Person & Face Presence Loop
   useEffect(() => {
     if (!enabled) return
 
     let isDetecting = false
 
     const interval = setInterval(() => {
-      // Never run camera checks in Cursor's internal preview webview or in hidden background tabs!
       if (
         typeof document !== 'undefined' &&
         (document.hidden || /Electron|Cursor/i.test(navigator.userAgent))
@@ -157,37 +172,82 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       }
       if (video.readyState < 2 || video.videoWidth === 0) return
 
-      if (!mpReadyRef.current || !mpDetectorRef.current) return
+      if (!modelsReadyRef.current) return
 
       isDetecting = true
       try {
-        let faceVisible = false
-        let boxX = 0.25
-        let boxY = 0.18
-        let boxW = 0.5
-        let boxH = 0.64
+        let personVisible = false
+        let boxX = 0.2
+        let boxY = 0.12
+        let boxW = 0.6
+        let boxH = 0.78
 
-        try {
-          const nowPerf = Math.max(
-            lastTimestampMsRef.current + 1,
-            Math.floor(performance.now())
-          )
-          lastTimestampMsRef.current = nowPerf
-          const result = mpDetectorRef.current.detectForVideo(video, nowPerf)
-          if (result && result.detections && result.detections.length > 0) {
-            const det = result.detections[0]
-            const bb = det.boundingBox
-            const vw = video.videoWidth || 320
-            const vh = video.videoHeight || 240
-            if (bb && bb.width >= 18 && bb.height >= 18) {
-              faceVisible = true
-              boxX = bb.originX / vw
-              boxY = bb.originY / vh
-              boxW = bb.width / vw
-              boxH = bb.height / vh
+        const nowPerf = Math.max(
+          lastTimestampMsRef.current + 2,
+          Math.floor(performance.now())
+        )
+        lastTimestampMsRef.current = nowPerf
+
+        // 1. Check MediaPipe SelfieSegmenter (detects a human person in the camera even if looking down or sideways!)
+        if (segmenterRef.current) {
+          try {
+            const segResult = segmenterRef.current.segmentForVideo(video, nowPerf)
+            const confMasks = segResult?.confidenceMasks
+            if (confMasks && confMasks.length > 0) {
+              const mask = confMasks[0]
+              const floatArr = mask.getAsFloat32Array()
+              const mW = mask.width
+              const mH = mask.height
+              const total = floatArr.length
+
+              let personPixels = 0
+              let minX = mW, maxX = 0, minY = mH, maxY = 0
+              // Step by 4 pixels for super-fast evaluation
+              for (let y = 0; y < mH; y += 2) {
+                const rowOff = y * mW
+                for (let x = 0; x < mW; x += 2) {
+                  if (floatArr[rowOff + x] > 0.45) {
+                    personPixels += 4
+                    if (x < minX) minX = x
+                    if (x > maxX) maxX = x
+                    if (y < minY) minY = y
+                    if (y > maxY) maxY = y
+                  }
+                }
+              }
+
+              const personAreaRatio = personPixels / Math.max(1, total)
+              // If at least 6% of the camera frame contains a human person -> Person is visible!
+              if (personAreaRatio >= 0.06) {
+                personVisible = true
+                boxX = minX / mW
+                boxY = minY / mH
+                boxW = Math.max(0.2, (maxX - minX) / mW)
+                boxH = Math.max(0.25, (maxY - minY) / mH)
+              }
             }
-          }
-        } catch {}
+            segResult?.close()
+          } catch {}
+        }
+
+        // 2. Also check MediaPipe FaceDetector
+        if (faceDetectorRef.current) {
+          try {
+            const faceRes = faceDetectorRef.current.detectForVideo(video, nowPerf + 1)
+            if (faceRes && faceRes.detections && faceRes.detections.length > 0) {
+              const bb = faceRes.detections[0].boundingBox
+              const vw = video.videoWidth || 320
+              const vh = video.videoHeight || 240
+              if (bb && bb.width >= 16 && bb.height >= 16) {
+                personVisible = true
+                boxX = bb.originX / vw
+                boxY = bb.originY / vh
+                boxW = bb.width / vw
+                boxH = bb.height / vh
+              }
+            }
+          } catch {}
+        }
 
         const now = Date.now()
         const {
@@ -197,12 +257,12 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           onBackFocused: cbFocused,
         } = callbacksRef.current
 
-        if (!faceVisible) {
-          // 1.4s continuous absence before turning RED
+        if (!personVisible) {
+          // As soon as no person is visible on camera for 0.6s -> TURN RED immediately!
           if (!missingStartMsRef.current) missingStartMsRef.current = now
           const elapsed = (now - missingStartMsRef.current) / 1000
 
-          if (elapsed >= 1.4) {
+          if (elapsed >= 0.6) {
             if (curStatus !== 'away_detected') {
               cbStatus('away_detected')
             }
@@ -212,7 +272,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             }
           }
         } else {
-          // Face is inside the camera -> Immediately GREEN!
+          // Person is visible on camera -> Immediately GREEN!
           missingStartMsRef.current = null
           hasTriggeredForCurrentAbsenceRef.current = false
           if (curStatus !== 'focused') {
@@ -221,7 +281,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           cbFocused()
         }
 
-        // Draw Green face box when visible, or Red frame when outside of screen
+        // Draw Green box when person is visible, or Red frame when no person is visible
         if (overlay) {
           const octx = overlay.getContext('2d')
           if (octx) {
@@ -230,9 +290,9 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             octx.clearRect(0, 0, W, H)
 
             const showRed =
-              !faceVisible &&
+              !personVisible &&
               missingStartMsRef.current !== null &&
-              now - missingStartMsRef.current >= 1400
+              now - missingStartMsRef.current >= 600
 
             if (!showRed) {
               const mirroredX = (1 - (boxX + boxW)) * W
@@ -244,7 +304,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
               octx.lineWidth = 2.5
               octx.strokeRect(mirroredX, ry, rw, rh)
             } else {
-              octx.fillStyle = 'rgba(244, 63, 94, 0.45)'
+              octx.fillStyle = 'rgba(244, 63, 94, 0.48)'
               octx.fillRect(0, 0, W, H)
               octx.strokeStyle = '#f43f5e'
               octx.lineWidth = 4
@@ -255,7 +315,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       } finally {
         isDetecting = false
       }
-    }, 160)
+    }, 150)
 
     return () => clearInterval(interval)
   }, [enabled, startCamera])
