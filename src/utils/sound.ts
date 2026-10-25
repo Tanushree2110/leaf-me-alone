@@ -1,10 +1,11 @@
-// Procedural Web Audio API Sound Engine with Hardware AudioContext Teardown on Mute & HMR Cleanup
+// Soothing Web Audio Engine with Cross-Tab Mute Sync (BroadcastChannel) & Zero Overlap
 
 export type AudioMood = 'studying' | 'storm' | 'silent'
 
 interface GlobalAudioRegistry {
   contexts: Set<AudioContext>
   timers: Set<ReturnType<typeof setInterval>>
+  nodes: Set<AudioScheduledSourceNode>
 }
 
 declare global {
@@ -15,22 +16,34 @@ declare global {
 
 function getRegistry(): GlobalAudioRegistry {
   if (typeof window === 'undefined') {
-    return { contexts: new Set(), timers: new Set() }
+    return { contexts: new Set(), timers: new Set(), nodes: new Set() }
   }
   if (!window.__leafAudioRegistry) {
     window.__leafAudioRegistry = {
       contexts: new Set(),
       timers: new Set(),
+      nodes: new Set(),
     }
+  }
+  if (!window.__leafAudioRegistry.nodes) {
+    window.__leafAudioRegistry.nodes = new Set()
   }
   return window.__leafAudioRegistry
 }
 
-// Immediately clean up any orphaned contexts/timers from previous HMR reloads
 export function nukeAllActiveAudio() {
   const reg = getRegistry()
   reg.timers.forEach((t) => clearInterval(t))
   reg.timers.clear()
+  reg.nodes.forEach((n) => {
+    try {
+      n.stop(0)
+    } catch {}
+    try {
+      n.disconnect()
+    } catch {}
+  })
+  reg.nodes.clear()
   reg.contexts.forEach((ctx) => {
     try {
       ctx.suspend().catch(() => {})
@@ -40,40 +53,44 @@ export function nukeAllActiveAudio() {
   reg.contexts.clear()
 }
 
+// Immediately silence any leftover audio on module load
 nukeAllActiveAudio()
 
-const SERENE_CHORDS: number[][] = [
-  [261.63, 329.63, 392.0, 493.88, 587.33], // Cmaj9
-  [220.0, 261.63, 329.63, 392.0, 493.88],  // Am9
-  [174.61, 220.0, 261.63, 329.63, 392.0],  // Fmaj9
-  [196.0, 246.94, 293.66, 369.99, 440.0],  // G6/9
+// Warm, soothing pentatonic singing-bowl / ambient pad frequencies (C major pentatonic in warm middle register)
+const SOOTHING_CHORDS: number[][] = [
+  [130.81, 196.0, 246.94, 293.66], // C3, G3, B3, D4
+  [110.0, 164.81, 196.0, 261.63],  // A2, E3, G3, C4
+  [87.31, 130.81, 164.81, 220.0],  // F2, C3, E3, A3
+  [98.0, 146.83, 196.0, 246.94],   // G2, D3, G3, B3
 ]
+
+const STORAGE_MUTE_KEY = 'leaf_me_alone_sound_enabled'
 
 class SoundEngine {
   private ctx: AudioContext | null = null
   private masterGain: GainNode | null = null
-  private enabled = true
+  private enabled: boolean = true
   private currentMood: AudioMood = 'studying'
   private musicTimer: ReturnType<typeof setInterval> | null = null
   private thunderTimer: ReturnType<typeof setInterval> | null = null
-  private stormNoiseNode: AudioBufferSourceNode | null = null
-  private stormGainNode: GainNode | null = null
-  private activeNodes: Set<AudioNode> = new Set()
   private chordIndex = 0
-  private unlocked = false
+  private channel: BroadcastChannel | null = null
 
   constructor() {
     if (typeof window !== 'undefined') {
-      const unlock = () => {
-        if (!this.unlocked) {
-          this.unlocked = true
-          if (this.enabled) {
-            this.applyMoodAudio(this.currentMood)
+      const saved = localStorage.getItem(STORAGE_MUTE_KEY)
+      if (saved === 'false') {
+        this.enabled = false
+      }
+
+      try {
+        this.channel = new BroadcastChannel('leaf_me_alone_audio_sync')
+        this.channel.onmessage = (ev) => {
+          if (ev.data?.type === 'SET_ENABLED') {
+            this.applyEnabledInternal(Boolean(ev.data.enabled))
           }
         }
-      }
-      window.addEventListener('pointerdown', unlock, { passive: true })
-      window.addEventListener('keydown', unlock, { passive: true })
+      } catch {}
     }
   }
 
@@ -87,7 +104,7 @@ class SoundEngine {
         this.ctx = new AudioCtx()
         getRegistry().contexts.add(this.ctx)
         this.masterGain = this.ctx.createGain()
-        this.masterGain.gain.setValueAtTime(1, this.ctx.currentTime)
+        this.masterGain.gain.setValueAtTime(0.8, this.ctx.currentTime)
         this.masterGain.connect(this.ctx.destination)
       }
     }
@@ -98,19 +115,24 @@ class SoundEngine {
     return { ctx: this.ctx, out: this.masterGain }
   }
 
-  public setEnabled(val: boolean) {
+  private applyEnabledInternal(val: boolean) {
     this.enabled = val
+    try {
+      localStorage.setItem(STORAGE_MUTE_KEY, String(val))
+    } catch {}
+
     if (!val) {
-      // Physically disconnect all nodes and close every AudioContext so sound stops 100% guaranteed
       this.stopAllMoodAudio()
-      if (this.masterGain) {
+      if (this.masterGain && this.ctx) {
         try {
+          this.masterGain.gain.setValueAtTime(0, this.ctx.currentTime)
           this.masterGain.disconnect()
         } catch {}
         this.masterGain = null
       }
       if (this.ctx) {
         try {
+          this.ctx.suspend().catch(() => {})
           this.ctx.close().catch(() => {})
         } catch {}
         this.ctx = null
@@ -121,19 +143,24 @@ class SoundEngine {
     }
   }
 
+  public setEnabled(val: boolean) {
+    this.applyEnabledInternal(val)
+    // Also broadcast to any other open localhost:5173 tabs so they mute immediately too!
+    try {
+      this.channel?.postMessage({ type: 'SET_ENABLED', enabled: val })
+    } catch {}
+  }
+
   public isEnabled(): boolean {
     return this.enabled
   }
 
   public destroy() {
-    this.setEnabled(false)
+    this.applyEnabledInternal(false)
   }
 
   public setMood(mood: AudioMood) {
-    if (
-      this.currentMood === mood &&
-      (this.musicTimer || this.stormNoiseNode || mood === 'silent')
-    ) {
+    if (this.currentMood === mood && (this.musicTimer || this.thunderTimer || mood === 'silent')) {
       return
     }
     this.currentMood = mood
@@ -155,32 +182,25 @@ class SoundEngine {
       getRegistry().timers.delete(this.thunderTimer)
       this.thunderTimer = null
     }
-    if (this.stormNoiseNode) {
+    // Stop every currently playing oscillator/buffer so studying music and storm NEVER overlap!
+    const reg = getRegistry()
+    reg.nodes.forEach((n) => {
       try {
-        this.stormNoiseNode.stop()
+        n.stop(0)
       } catch {}
       try {
-        this.stormNoiseNode.disconnect()
-      } catch {}
-      this.stormNoiseNode = null
-    }
-    if (this.stormGainNode) {
-      try {
-        this.stormGainNode.disconnect()
-      } catch {}
-      this.stormGainNode = null
-    }
-    this.activeNodes.forEach((node) => {
-      try {
-        if ('stop' in node && typeof (node as AudioScheduledSourceNode).stop === 'function') {
-          ;(node as AudioScheduledSourceNode).stop()
-        }
-      } catch {}
-      try {
-        node.disconnect()
+        n.disconnect()
       } catch {}
     })
-    this.activeNodes.clear()
+    reg.nodes.clear()
+  }
+
+  private registerSource(node: AudioScheduledSourceNode) {
+    const reg = getRegistry()
+    reg.nodes.add(node)
+    node.onended = () => {
+      reg.nodes.delete(node)
+    }
   }
 
   private applyMoodAudio(mood: AudioMood) {
@@ -191,100 +211,59 @@ class SoundEngine {
     if (!audio) return
 
     if (mood === 'studying') {
-      this.playSereneChordSlice()
+      // Only play soothing warm sine pad (NO rain noise!)
+      this.playSoothingPadChord()
       this.musicTimer = setInterval(() => {
         if (this.enabled && this.currentMood === 'studying') {
-          this.playSereneChordSlice()
+          this.playSoothingPadChord()
         }
-      }, 3600)
+      }, 4500)
       getRegistry().timers.add(this.musicTimer)
     } else if (mood === 'storm') {
-      this.startRoughStormLoop()
+      // Stop soothing music completely and play thunder rumble
       this.playThunderCrack()
       this.thunderTimer = setInterval(() => {
         if (this.enabled && this.currentMood === 'storm') {
           this.playThunderCrack()
         }
-      }, 4200)
+      }, 4000)
       getRegistry().timers.add(this.thunderTimer)
     }
   }
 
-  private playSereneChordSlice() {
-    if (!this.enabled) return
+  // Pure, warm, soothing sine-wave ambient pad (slow 1.2s fade-in, gentle volume, zero harsh harmonics)
+  private playSoothingPadChord() {
+    if (!this.enabled || this.currentMood !== 'studying') return
     const audio = this.getContext()
     if (!audio || audio.ctx.state !== 'running') return
     const { ctx, out } = audio
 
-    const chord = SERENE_CHORDS[this.chordIndex % SERENE_CHORDS.length]
+    const chord = SOOTHING_CHORDS[this.chordIndex % SOOTHING_CHORDS.length]
     this.chordIndex++
     const now = ctx.currentTime
-
-    const masterFilter = ctx.createBiquadFilter()
-    masterFilter.type = 'lowpass'
-    masterFilter.frequency.setValueAtTime(920, now)
-    masterFilter.connect(out)
-    this.activeNodes.add(masterFilter)
 
     chord.forEach((freq, i) => {
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
-      osc.type = i === 0 ? 'sine' : 'triangle'
-      osc.frequency.setValueAtTime(freq, now + i * 0.12)
 
-      gain.gain.setValueAtTime(0.0001, now + i * 0.12)
-      gain.gain.linearRampToValueAtTime(0.024, now + i * 0.12 + 0.45)
-      gain.gain.exponentialRampToValueAtTime(0.0008, now + 3.5)
+      // Pure sine wave for soothing singing-bowl / warm ambient pad tone
+      osc.type = 'sine'
+      osc.frequency.setValueAtTime(freq, now)
+
+      gain.gain.setValueAtTime(0.0001, now)
+      gain.gain.linearRampToValueAtTime(0.018 / (1 + i * 0.25), now + 1.4)
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 4.3)
 
       osc.connect(gain)
-      gain.connect(masterFilter)
-      this.activeNodes.add(osc)
-      osc.onended = () => this.activeNodes.delete(osc)
-      osc.start(now + i * 0.12)
-      osc.stop(now + 3.55)
+      gain.connect(out)
+      this.registerSource(osc)
+
+      osc.start(now)
+      osc.stop(now + 4.4)
     })
   }
 
-  private startRoughStormLoop() {
-    if (!this.enabled) return
-    const audio = this.getContext()
-    if (!audio) return
-    const { ctx, out } = audio
-
-    const bufferSize = ctx.sampleRate * 2
-    const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate)
-    const output = buffer.getChannelData(0)
-    let b0 = 0, b1 = 0, b2 = 0
-    for (let i = 0; i < bufferSize; i++) {
-      const white = Math.random() * 2 - 1
-      b0 = 0.99 * b0 + white * 0.12
-      b1 = 0.96 * b1 + white * 0.22
-      b2 = 0.85 * b2 + white * 0.35
-      output[i] = (b0 + b1 + b2 + white * 0.4) * 0.08
-    }
-
-    const noise = ctx.createBufferSource()
-    noise.buffer = buffer
-    noise.loop = true
-
-    const filter = ctx.createBiquadFilter()
-    filter.type = 'bandpass'
-    filter.frequency.setValueAtTime(750, ctx.currentTime)
-    filter.Q.setValueAtTime(0.7, ctx.currentTime)
-
-    const gain = ctx.createGain()
-    gain.gain.setValueAtTime(0.28, ctx.currentTime)
-
-    noise.connect(filter)
-    filter.connect(gain)
-    gain.connect(out)
-    noise.start()
-
-    this.stormNoiseNode = noise
-    this.stormGainNode = gain
-    this.activeNodes.add(noise)
-  }
-
+  // Deep low-pitched thunder rumble when not studying
   public playThunderCrack() {
     if (!this.enabled) return
     const audio = this.getContext()
@@ -296,7 +275,7 @@ class SoundEngine {
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate)
     const data = buffer.getChannelData(0)
     for (let i = 0; i < bufferSize; i++) {
-      const env = i < ctx.sampleRate * 0.08 ? 1.0 : Math.exp(-i / (ctx.sampleRate * 0.45))
+      const env = i < ctx.sampleRate * 0.06 ? 1.0 : Math.exp(-i / (ctx.sampleRate * 0.45))
       data[i] = (Math.random() * 2 - 1) * env
     }
 
@@ -305,18 +284,18 @@ class SoundEngine {
 
     const filter = ctx.createBiquadFilter()
     filter.type = 'lowpass'
-    filter.frequency.setValueAtTime(880, now)
-    filter.frequency.exponentialRampToValueAtTime(95, now + 1.3)
+    filter.frequency.setValueAtTime(320, now)
+    filter.frequency.exponentialRampToValueAtTime(65, now + 1.3)
 
     const gain = ctx.createGain()
-    gain.gain.setValueAtTime(0.32, now)
+    gain.gain.setValueAtTime(0.28, now)
     gain.gain.exponentialRampToValueAtTime(0.001, now + 1.35)
 
     noise.connect(filter)
     filter.connect(gain)
     gain.connect(out)
-    this.activeNodes.add(noise)
-    noise.onended = () => this.activeNodes.delete(noise)
+    this.registerSource(noise)
+
     noise.start(now)
     noise.stop(now + 1.4)
   }
@@ -327,57 +306,34 @@ class SoundEngine {
     if (!audio) return
     const { ctx, out } = audio
 
-    const notes = [523.25, 659.25, 783.99, 1046.5]
+    const notes = [523.25, 659.25, 783.99]
     const now = ctx.currentTime
 
     notes.forEach((freq, idx) => {
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
       osc.type = 'sine'
-      osc.frequency.setValueAtTime(freq, now + idx * 0.065)
+      osc.frequency.setValueAtTime(freq, now + idx * 0.08)
 
-      gain.gain.setValueAtTime(0.001, now + idx * 0.065)
-      gain.gain.exponentialRampToValueAtTime(0.11, now + idx * 0.065 + 0.02)
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.065 + 0.45)
+      gain.gain.setValueAtTime(0.0001, now + idx * 0.08)
+      gain.gain.linearRampToValueAtTime(0.05, now + idx * 0.08 + 0.03)
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.08 + 0.45)
 
       osc.connect(gain)
       gain.connect(out)
-      this.activeNodes.add(osc)
-      osc.onended = () => this.activeNodes.delete(osc)
-      osc.start(now + idx * 0.065)
-      osc.stop(now + idx * 0.065 + 0.48)
+      this.registerSource(osc)
+      osc.start(now + idx * 0.08)
+      osc.stop(now + idx * 0.08 + 0.48)
     })
   }
 
   public playClipboardPenalty() {
     if (!this.enabled) return
-    const audio = this.getContext()
-    if (!audio) return
-    const { ctx, out } = audio
-    const now = ctx.currentTime
-
     this.playThunderCrack()
-
-    ;[0, 0.09].forEach((offset) => {
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.type = 'triangle'
-      osc.frequency.setValueAtTime(1400, now + offset)
-      osc.frequency.exponentialRampToValueAtTime(420, now + offset + 0.03)
-
-      gain.gain.setValueAtTime(0.15, now + offset)
-      gain.gain.exponentialRampToValueAtTime(0.001, now + offset + 0.035)
-
-      osc.connect(gain)
-      gain.connect(out)
-      this.activeNodes.add(osc)
-      osc.onended = () => this.activeNodes.delete(osc)
-      osc.start(now + offset)
-      osc.stop(now + offset + 0.04)
-    })
   }
 
   public playThunderClimax() {
+    if (!this.enabled) return
     this.playThunderCrack()
   }
 
@@ -388,24 +344,23 @@ class SoundEngine {
     const { ctx, out } = audio
     const now = ctx.currentTime
 
-    const chord = [523.25, 659.25, 783.99, 987.77, 1046.5, 1318.5]
+    const chord = [261.63, 329.63, 392.0, 523.25]
     chord.forEach((freq, idx) => {
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
-      osc.type = 'triangle'
-      const t0 = now + idx * 0.075
+      osc.type = 'sine'
+      const t0 = now + idx * 0.09
       osc.frequency.setValueAtTime(freq, t0)
 
-      gain.gain.setValueAtTime(0.001, t0)
-      gain.gain.exponentialRampToValueAtTime(0.11, t0 + 0.03)
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.85)
+      gain.gain.setValueAtTime(0.0001, t0)
+      gain.gain.linearRampToValueAtTime(0.06, t0 + 0.04)
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.9)
 
       osc.connect(gain)
       gain.connect(out)
-      this.activeNodes.add(osc)
-      osc.onended = () => this.activeNodes.delete(osc)
+      this.registerSource(osc)
       osc.start(t0)
-      osc.stop(t0 + 0.9)
+      osc.stop(t0 + 0.95)
     })
   }
 
@@ -417,53 +372,25 @@ class SoundEngine {
     const now = ctx.currentTime
 
     const osc = ctx.createOscillator()
-    const overtone = ctx.createOscillator()
     const gain = ctx.createGain()
 
     osc.type = 'sine'
-    osc.frequency.setValueAtTime(587.33, now)
-    overtone.type = 'sine'
-    overtone.frequency.setValueAtTime(1174.66, now)
+    osc.frequency.setValueAtTime(528.0, now) // 528Hz soothing chime
 
-    gain.gain.setValueAtTime(0.001, now)
-    gain.gain.exponentialRampToValueAtTime(0.14, now + 0.015)
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.4)
+    gain.gain.setValueAtTime(0.0001, now)
+    gain.gain.linearRampToValueAtTime(0.08, now + 0.03)
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.5)
 
     osc.connect(gain)
-    overtone.connect(gain)
     gain.connect(out)
-
-    this.activeNodes.add(osc)
-    this.activeNodes.add(overtone)
-    osc.onended = () => this.activeNodes.delete(osc)
-    overtone.onended = () => this.activeNodes.delete(overtone)
+    this.registerSource(osc)
 
     osc.start(now)
-    overtone.start(now)
-    osc.stop(now + 1.45)
-    overtone.stop(now + 1.45)
+    osc.stop(now + 1.55)
   }
 
   public playSoftClick() {
-    if (!this.enabled) return
-    const audio = this.getContext()
-    if (!audio) return
-    const { ctx, out } = audio
-    const now = ctx.currentTime
-
-    const osc = ctx.createOscillator()
-    const gain = ctx.createGain()
-    osc.type = 'sine'
-    osc.frequency.setValueAtTime(880, now)
-    osc.frequency.exponentialRampToValueAtTime(660, now + 0.04)
-
-    gain.gain.setValueAtTime(0.05, now)
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.045)
-
-    osc.connect(gain)
-    gain.connect(out)
-    osc.start(now)
-    osc.stop(now + 0.05)
+    // Silent UI click so clicking buttons never makes unwanted noise
   }
 }
 

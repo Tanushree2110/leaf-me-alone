@@ -159,7 +159,19 @@ export function App() {
   )
 
   // Sound state (controls serene studying music + rough lightning storm audio)
-  const [soundEnabled, setSoundEnabled] = useState<boolean>(true)
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(() => soundFX.isEnabled())
+
+  useEffect(() => {
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'leaf_me_alone_sound_enabled') {
+        const val = e.newValue !== 'false'
+        setSoundEnabled(val)
+        soundFX.setEnabled(val)
+      }
+    }
+    window.addEventListener('storage', handleStorage)
+    return () => window.removeEventListener('storage', handleStorage)
+  }, [])
 
   // Opt-In Customizable Pomodoro State
   const [pomodoro, setPomodoro] = useState<PomodoroConfig>({
