@@ -1,9 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AlertTriangle,
   Camera,
   Check,
   CheckCircle2,
   ChevronDown,
+  ClipboardList,
   Coffee,
   Layers,
   Leaf,
@@ -18,7 +20,6 @@ import {
 } from 'lucide-react'
 import {
   ActivityLogItem,
-  AllowedTab,
   CameraStatus,
   FocusMode,
   LeafNode,
@@ -42,7 +43,16 @@ import { WebcamGuard } from './components/WebcamGuard'
 import { AllowedTabsManager } from './components/AllowedTabsManager'
 import { PomodoroConfig, PomodoroPanel } from './components/PomodoroPanel'
 
-type ExpandablePanel = 'pomodoro' | 'tabs' | 'upgrades' | null
+type ExpandablePanel = 'pomodoro' | 'tabs' | 'upgrades' | 'log' | null
+
+interface SessionLogRecord {
+  sessionNumber: number
+  startedAt: string
+  totalViolations: number
+  faceAwayCount: number
+  blockedNewTabCount: number
+  events: ActivityLogItem[]
+}
 
 function generateProceduralVineSegments(): VineSegment[] {
   const points = [
@@ -116,25 +126,6 @@ function createInitialLeaves(segments: VineSegment[]): LeafNode[] {
   return list
 }
 
-const STORAGE_KEY_TABS = 'leaf_me_alone_chrome_tabs_v2'
-
-function loadSavedChromeTabs(): AllowedTab[] {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_TABS)
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed
-    }
-  } catch {}
-  return [
-    {
-      id: 'tab-current',
-      title: 'Leaf Me Alone (Chrome)',
-      url: typeof window !== 'undefined' ? window.location.href : 'http://localhost:5173',
-    },
-  ]
-}
-
 export function App() {
   const studioCanvasRef = useRef<HTMLCanvasElement>(null)
   const vineSegments = useMemo(() => generateProceduralVineSegments(), [])
@@ -148,8 +139,11 @@ export function App() {
   const [upgrades, setUpgrades] = useState<RoomUpgrade[]>(INITIAL_UPGRADES)
   const [daysSinceDoomscroll, setDaysSinceDoomscroll] = useState<number>(4)
   const [dialogueText, setDialogueText] = useState<string>(
-    'Select your Pomodoro timer & initial tabs, then click Start!'
+    'Select your Pomodoro timer, then click Start!'
   )
+
+  // Live Red Reason Banner (shown whenever the screen is RED so you always know WHY!)
+  const [currentRedReason, setCurrentRedReason] = useState<string | null>(null)
 
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => soundFX.isEnabled())
 
@@ -192,20 +186,23 @@ export function App() {
   const [webcamEnabled, setWebcamEnabled] = useState<boolean>(true)
   const [cameraStatus, setCameraStatus] = useState<CameraStatus>('focused')
 
-  // Chrome Tabs State
-  const [allowedTabs, setAllowedTabs] = useState<AllowedTab[]>(() => loadSavedChromeTabs())
-  const [isWhitelistLocked, setIsWhitelistLocked] = useState<boolean>(true)
-  const [activeAllowedTabId, setActiveAllowedTabId] = useState<string | null>('tab-current')
+  // Chrome Tab Guard State
   const [extensionConnected, setExtensionConnected] = useState<boolean>(false)
+  const [allowedTabsCount, setAllowedTabsCount] = useState<number>(1)
 
-  const authorizedLinkClickUntilMsRef = useRef<number>(0)
   const lastDistractionMsRef = useRef<number>(0)
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY_TABS, JSON.stringify(allowedTabs))
-    } catch {}
-  }, [allowedTabs])
+  // Simple Per-Session Violation Log & Metrics
+  const [sessionsLog, setSessionsLog] = useState<SessionLogRecord[]>(() => [
+    {
+      sessionNumber: 1,
+      startedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      totalViolations: 0,
+      faceAwayCount: 0,
+      blockedNewTabCount: 0,
+      events: [],
+    },
+  ])
 
   const [stats, setStats] = useState<SessionStats>({
     focusSeconds: 0,
@@ -222,34 +219,41 @@ export function App() {
     speedMultiplier: 1,
   })
 
-  const [, setActivityLog] = useState<ActivityLogItem[]>([])
-
-  const appendLog = useCallback(
-    (type: ActivityLogItem['type'], message: string, quote?: string) => {
-      const item: ActivityLogItem = {
+  const recordViolationInCurrentSession = useCallback(
+    (category: 'face_away' | 'blocked_new_tab', reason: string) => {
+      const timeStr = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+      const entry: ActivityLogItem = {
         id: `${Date.now()}-${Math.random()}`,
-        timestamp: new Date().toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
-        type,
-        message,
-        quote,
+        timestamp: timeStr,
+        type: category === 'face_away' ? 'camera' : 'distraction',
+        message: reason,
       }
-      setActivityLog((prev) => [item, ...prev.slice(0, 20)])
+
+      setSessionsLog((prev) => {
+        const copy = [...prev]
+        const current = { ...copy[0] }
+        current.totalViolations += 1
+        if (category === 'face_away') current.faceAwayCount += 1
+        else current.blockedNewTabCount += 1
+        current.events = [entry, ...current.events]
+        copy[0] = current
+        return copy
+      })
     },
     []
   )
 
-  // Rough storm weather + RED border is ONLY active when your face is missing from camera
-  // OR for 3 seconds right after an unauthorized tab attempt!
   const isRoughWeather =
     cameraStatus === 'away_detected' ||
     cameraStatus === 'phone_detected' ||
     focusMode === 'distracted' ||
     focusMode === 'last_leaf_climax'
 
-  // Sync Background Music (Soothing Pad when Studying vs Thunder Storm when Not Studying)
+  // Sync Background Music (Soothing Pad when Studying vs Thunder Storm when RED)
   useEffect(() => {
     if (!soundEnabled) {
       soundFX.setMood('silent')
@@ -330,12 +334,12 @@ export function App() {
     setStats((s) => ({ ...s, leavesGrown: s.leavesGrown + 1 }))
   }, [vineSegments])
 
-  // Trigger a distraction event
+  // Trigger a Violation (ONLY from: 1. Face Away on Camera >=3s, or 2. Blocked Standalone New Tab!)
   const triggerDistraction = useCallback(
     (
-      reason = 'Opened an unapproved new tab!',
-      customQuotes?: string[],
-      logType: ActivityLogItem['type'] = 'distraction'
+      reason: string,
+      category: 'face_away' | 'blocked_new_tab',
+      customQuotes?: string[]
     ) => {
       if (
         pomodoro.enabled &&
@@ -345,9 +349,12 @@ export function App() {
       }
 
       lastDistractionMsRef.current = Date.now()
+      setCurrentRedReason(reason)
       setDaysSinceDoomscroll(0)
       leafAccumulatorSecRef.current = 0
       setNextLeafProgress(0)
+
+      recordViolationInCurrentSession(category, reason)
 
       setLeaves((prevLeaves) => {
         const attached = prevLeaves.filter((l) => l.status === 'attached' || l.status === 'dying')
@@ -383,7 +390,6 @@ export function App() {
           setRoommateState('dramatic_sickbed')
           const quote = pickRandomDialogue('dramatic_sickbed', victim.id)
           setDialogueText(`${reason} — ${quote}`)
-          appendLog('climax', `Last Leaf Climax! Only 1 leaf left.`, quote)
         } else {
           soundFX.playClipboardPenalty()
           setFocusMode('distracted')
@@ -403,7 +409,6 @@ export function App() {
               )
             : pickRandomDialogue(chosenState, victim.id)
           setDialogueText(`${reason} — ${quote}`)
-          appendLog(logType, `${reason} — Leaf #${victim.id} dropped.`, quote)
         }
 
         return updated
@@ -411,18 +416,18 @@ export function App() {
 
       setStats((prev) => ({
         ...prev,
-        tabSwitches: logType === 'distraction' ? prev.tabSwitches + 1 : prev.tabSwitches,
-        phoneAlerts: logType === 'camera' ? prev.phoneAlerts + 1 : prev.phoneAlerts,
+        tabSwitches: category === 'blocked_new_tab' ? prev.tabSwitches + 1 : prev.tabSwitches,
+        phoneAlerts: category === 'face_away' ? prev.phoneAlerts + 1 : prev.phoneAlerts,
         unbrokenFocusSeconds: 0,
         comebackProgressSeconds: 0,
         leavesLost: prev.leavesLost + 1,
         roomTempCelsius: Math.max(7, prev.roomTempCelsius - 3.5),
       }))
     },
-    [appendLog, vineSegments, pomodoro.enabled, pomodoro.phase]
+    [vineSegments, pomodoro.enabled, pomodoro.phase, recordViolationInCurrentSession]
   )
 
-  // Listen to Chrome Extension postMessage events (Strict Tab Blocker)
+  // Listen to Chrome Extension postMessage events (Strict New-Tab Blocker)
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== window || !event.data) return
@@ -432,124 +437,30 @@ export function App() {
         setExtensionConnected(true)
       }
 
-      if (data.type === 'LEAF_CHROME_TABS_SYNC' && Array.isArray(data.tabs)) {
+      if (data.type === 'LEAF_CHROME_GUARD_STATUS') {
         setExtensionConnected(true)
-        const liveTabs = data.tabs as Array<{
-          chromeTabId: number
-          title: string
-          url: string
-          openerTabId: number | null
-          active: boolean
-        }>
-        const activeLive = liveTabs.find((t) => t.active)
-        if (activeLive) {
-          setActiveAllowedTabId(`chrome-${activeLive.chromeTabId}`)
+        if (typeof data.allowedCount === 'number') {
+          setAllowedTabsCount(data.allowedCount)
         }
-
-        if (!isWhitelistLocked && !pomodoro.isRunning && liveTabs.length > 0) {
-          setAllowedTabs(
-            liveTabs.map((t) => ({
-              id: `chrome-${t.chromeTabId}`,
-              chromeTabId: t.chromeTabId,
-              title: t.title,
-              url: t.url,
-              isActive: t.active,
-            }))
-          )
-        } else {
-          setAllowedTabs((prev) =>
-            prev.map((item) => {
-              const liveMatch = liveTabs.find(
-                (lt) => String(lt.chromeTabId) === String(item.chromeTabId)
-              )
-              return liveMatch
-                ? { ...item, title: liveMatch.title || item.title, url: liveMatch.url || item.url }
-                : item
-            })
-          )
-        }
-      }
-
-      if (data.type === 'LEAF_CHROME_LINK_TAB_ALLOWED' && data.tab) {
-        const newTab = data.tab as {
-          chromeTabId: number
-          title: string
-          url: string
-          openerTabId: number | null
-        }
-        authorizedLinkClickUntilMsRef.current = Date.now() + 8000
-        setAllowedTabs((prev) => {
-          if (prev.some((p) => String(p.chromeTabId) === String(newTab.chromeTabId))) {
-            return prev
-          }
-          const openerParent = prev.find(
-            (p) => p.chromeTabId && String(p.chromeTabId) === String(newTab.openerTabId)
-          )
-          const rootParentId = openerParent?.parentId || openerParent?.id || prev[0]?.id
-          return [
-            ...prev,
-            {
-              id: `chrome-${newTab.chromeTabId}`,
-              chromeTabId: newTab.chromeTabId,
-              title: newTab.title || 'Linked Sub-Tab',
-              url: newTab.url || '',
-              parentId: rootParentId,
-            },
-          ]
-        })
       }
 
       if (data.type === 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED') {
-        triggerDistraction('BLOCKED NEW TAB! Only links clicked from existing tabs are allowed!')
+        triggerDistraction(
+          data.reason || 'Blocked opening a standalone New Tab (+ / Cmd+T)',
+          'blocked_new_tab'
+        )
       }
     }
 
     window.addEventListener('message', handleMessage)
     window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
-    const syncTimer = setInterval(() => {
-      window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
-    }, 3000)
-
     return () => {
       window.removeEventListener('message', handleMessage)
-      clearInterval(syncTimer)
     }
-  }, [isWhitelistLocked, pomodoro.isRunning, triggerDistraction])
+  }, [triggerDistraction])
 
-  const handleRequestExtensionSync = () => {
-    window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
-  }
-
-  const handleOpenLinkFromExistingTab = (parentTab: AllowedTab, linkUrl: string) => {
-    authorizedLinkClickUntilMsRef.current = Date.now() + 12000
-    const subTab: AllowedTab = {
-      id: `sub-${Date.now()}`,
-      title: `${parentTab.title} (Linked)`,
-      url: linkUrl,
-      parentId: parentTab.parentId || parentTab.id,
-    }
-    setAllowedTabs((prev) => [...prev, subTab])
-    setActiveAllowedTabId(subTab.id)
-    window.open(linkUrl, '_blank', 'noopener,noreferrer')
-  }
-
-  const handleSwitchToAllowedTab = (tab: AllowedTab) => {
-    authorizedLinkClickUntilMsRef.current = Date.now() + 10000
-    setActiveAllowedTabId(tab.id)
-    setStats((prev) => ({
-      ...prev,
-      authorizedTabSwitches: prev.authorizedTabSwitches + 1,
-    }))
-
-    if (tab.chromeTabId && extensionConnected) {
-      window.postMessage(
-        { type: 'LEAF_APP_ACTIVATE_TAB', chromeTabId: tab.chromeTabId },
-        '*'
-      )
-    }
-  }
-
-  // Block Cmd+T / Ctrl+T on page & detect unauthorized tab switches
+  // Block Cmd+T / Ctrl+T shortcut while on the game page
+  // NOTE: Switching between or closing your existing tabs (visibilitychange) is 100% ALLOWED and NEVER triggers red!
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
@@ -557,69 +468,45 @@ export function App() {
         (e.key === 't' || e.key === 'T' || e.key === 'n' || e.key === 'N')
       ) {
         e.preventDefault()
-        triggerDistraction('NO NEW TABS ALLOWED! Only click links on existing tabs!')
-      }
-    }
-
-    const handleVisibility = () => {
-      if (document.hidden) {
-        if (Date.now() <= authorizedLinkClickUntilMsRef.current) {
-          return
-        }
-        triggerDistraction('Opened a new/unapproved tab! Only links from existing tabs allowed!')
+        triggerDistraction(
+          'Pressed Cmd+T to open a standalone New Tab (only links from existing tabs allowed)',
+          'blocked_new_tab'
+        )
       }
     }
 
     window.addEventListener('keydown', handleKeyDown, true)
-    document.addEventListener('visibilitychange', handleVisibility)
     return () => {
       window.removeEventListener('keydown', handleKeyDown, true)
-      document.removeEventListener('visibilitychange', handleVisibility)
     }
   }, [triggerDistraction])
 
-  useEffect(() => {
-    const handleAnchorClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null
-      const anchor = target?.closest?.('a[href]') as HTMLAnchorElement | null
-      if (anchor && anchor.href) {
-        authorizedLinkClickUntilMsRef.current = Date.now() + 10000
-      }
-    }
-    window.addEventListener('mousedown', handleAnchorClick, true)
-    return () => window.removeEventListener('mousedown', handleAnchorClick, true)
-  }, [])
-
   const handlePhoneDetected = useCallback(() => {
-    triggerDistraction('Webcam: Phone glance detected!', PHONE_DETECTED_QUOTES, 'camera')
+    triggerDistraction(
+      'Face disappeared from camera for >3s',
+      'face_away',
+      PHONE_DETECTED_QUOTES
+    )
   }, [triggerDistraction])
 
   const handleAwayDetected = useCallback(() => {
-    triggerDistraction('Webcam: Face disappeared from camera!', AWAY_DETECTED_QUOTES, 'camera')
+    triggerDistraction(
+      'Face disappeared from camera for >3s',
+      'face_away',
+      AWAY_DETECTED_QUOTES
+    )
   }, [triggerDistraction])
 
-  // Whenever your face is visible on screen, automatically clear any red distraction state!
+  // Whenever your face is visible on screen, clear the RED banner after 3s of a tab alert or immediately after returning to camera!
   const handleCameraBackFocused = useCallback(() => {
-    // Allow at least 2.2s after a tab violation so you see the red flash, then immediately restore GREEN when on screen!
-    if (Date.now() - lastDistractionMsRef.current < 2200) return
-    if (focusMode === 'distracted' || focusMode === 'last_leaf_climax') {
+    if (Date.now() - lastDistractionMsRef.current < 3000) return
+    if (focusMode === 'distracted' || focusMode === 'last_leaf_climax' || currentRedReason) {
+      setCurrentRedReason(null)
       setFocusMode('locked_in')
       setRoommateState('typing')
       setDialogueText('On screen & focused! Sunlight is back—watch the ivy climb.')
     }
-  }, [focusMode])
-
-  const handleAddInitialTab = (title: string, url: string) => {
-    if (isWhitelistLocked || pomodoro.isRunning) return
-    const newTab: AllowedTab = { id: `tab-${Date.now()}`, title, url }
-    setAllowedTabs((prev) => [...prev, newTab])
-    setActiveAllowedTabId(newTab.id)
-  }
-
-  const handleRemoveInitialTab = (id: string) => {
-    if (isWhitelistLocked || pomodoro.isRunning) return
-    setAllowedTabs((prev) => prev.filter((t) => t.id !== id && t.parentId !== id))
-  }
+  }, [focusMode, currentRedReason])
 
   // Falling leaf physics loop
   useEffect(() => {
@@ -672,12 +559,10 @@ export function App() {
 
   const handleStartPomodoroSession = useCallback(() => {
     soundFX.playPomodoroBell()
-    setIsWhitelistLocked(true)
+    setCurrentRedReason(null)
     setFocusMode('locked_in')
     setRoommateState('typing')
-    setDialogueText(
-      `Pomodoro Session started (${pomodoro.focusMinutes}m)! Timer & tabs are now locked.`
-    )
+    setDialogueText(`Pomodoro Session started (${pomodoro.focusMinutes}m)! Timer locked.`)
     setPomodoro((prev) => ({
       ...prev,
       phase: 'focus',
@@ -689,6 +574,7 @@ export function App() {
   const handleStopPomodoroSession = useCallback(() => {
     leafAccumulatorSecRef.current = 0
     setNextLeafProgress(0)
+    setCurrentRedReason(null)
     setDialogueText('Pomodoro stopped. You can now switch or select your Pomodoro timers.')
     setPomodoro((prev) => ({
       ...prev,
@@ -700,14 +586,24 @@ export function App() {
 
   const handleStartNextSession = useCallback(() => {
     soundFX.playPomodoroBell()
-    setIsWhitelistLocked(true)
     leafAccumulatorSecRef.current = 0
     setNextLeafProgress(0.05)
+    setCurrentRedReason(null)
     setFocusMode('locked_in')
     setRoommateState('typing')
-    setDialogueText(
-      `Starting Pomodoro Session #${pomodoro.completedCycles + 1}! Timer & tabs locked.`
-    )
+    const nextSessionNum = sessionsLog.length + 1
+    setSessionsLog((prev) => [
+      {
+        sessionNumber: nextSessionNum,
+        startedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        totalViolations: 0,
+        faceAwayCount: 0,
+        blockedNewTabCount: 0,
+        events: [],
+      },
+      ...prev,
+    ])
+    setDialogueText(`Starting Pomodoro Session #${nextSessionNum}! Timer locked.`)
     setPomodoro((prev) => ({
       ...prev,
       phase: 'focus',
@@ -715,7 +611,7 @@ export function App() {
       remainingSeconds: prev.focusMinutes * 60,
     }))
     setActivePanel(null)
-  }, [pomodoro.completedCycles])
+  }, [sessionsLog.length])
 
   // Main 1-second Focus, Pomodoro Break, & Stop-After-Break Loop
   useEffect(() => {
@@ -852,6 +748,7 @@ export function App() {
   ).length
   const comebackProgress = Math.min(1, stats.comebackProgressSeconds / 300)
   const unlockedUpgradesCount = upgrades.filter((u) => u.unlocked).length
+  const currentSession = sessionsLog[0]
 
   return (
     <div
@@ -928,11 +825,6 @@ export function App() {
                   ? 'bg-rose-600 hover:bg-rose-500'
                   : 'bg-emerald-600 hover:bg-emerald-500'
               }`}
-              title={
-                pomodoro.isRunning
-                  ? 'Stop Session (Unlocks timer selection)'
-                  : 'Start Session (Locks timer & initial tabs)'
-              }
             >
               {pomodoro.isRunning ? (
                 <>
@@ -949,7 +841,7 @@ export function App() {
           )}
         </div>
 
-        {/* Right: Clean Controls (Tabs, Room & Skins, Sound, Polaroid) */}
+        {/* Right: Clean Controls (Tabs, Violations Log, Room & Skins, Sound, Polaroid) */}
         <div className="flex items-center gap-1.5 font-mono text-xs">
           <button
             onClick={() => togglePanel('tabs')}
@@ -960,7 +852,23 @@ export function App() {
             }`}
           >
             <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
-            <span>Tabs ({allowedTabs.length})</span>
+            <span>Tabs</span>
+          </button>
+
+          {/* Session Violations & Log Button */}
+          <button
+            onClick={() => togglePanel('log')}
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-semibold transition ${
+              activePanel === 'log'
+                ? 'border-rose-500 bg-rose-500/20 text-rose-200'
+                : currentSession.totalViolations > 0
+                ? 'border-rose-500/40 bg-rose-950/50 text-rose-300 hover:bg-rose-900/50'
+                : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
+            }`}
+            title="Session Violation Log & Metrics"
+          >
+            <ClipboardList className="h-3.5 w-3.5 text-rose-400" />
+            <span>Violations ({currentSession.totalViolations})</span>
           </button>
 
           <button
@@ -972,7 +880,7 @@ export function App() {
             }`}
           >
             <Palette className="h-3.5 w-3.5 text-amber-400" />
-            <span className="hidden sm:inline">Room &amp; Skins</span>
+            <span className="hidden sm:inline">Skins</span>
           </button>
 
           {/* Mood Music & Storm Audio Toggle */}
@@ -1017,6 +925,24 @@ export function App() {
 
       {/* FULL-SCREEN STUDIO STAGE */}
       <main className="relative flex flex-1 min-h-0 w-full items-center justify-center p-3 overflow-hidden">
+        {/* LIVE RED REASON BANNER (Shows exact reason why it is RED + violation count!) */}
+        {isRoughWeather && currentRedReason && (
+          <div className="
+            absolute top-5 left-1/2 -translate-x-1/2 z-30
+            flex items-center gap-2.5 rounded-xl border-2 border-rose-400
+            bg-rose-950/95 px-4 py-2 font-mono text-xs font-bold text-rose-100 shadow-2xl
+          ">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400 animate-bounce" />
+            <span>WHY RED: {currentRedReason}</span>
+            <button
+              onClick={() => setActivePanel('log')}
+              className="ml-2 rounded-lg bg-rose-800/80 px-2 py-0.5 text-[10px] text-rose-100 hover:bg-rose-700"
+            >
+              View Log ({currentSession.totalViolations})
+            </button>
+          </div>
+        )}
+
         <div
           className={`h-full w-full max-w-5xl rounded-2xl transition-all ${
             isRoughWeather ? 'ring-4 ring-rose-500 shadow-2xl shadow-rose-950' : ''
@@ -1052,8 +978,8 @@ export function App() {
                 Pomodoro &amp; Break Complete
               </h2>
               <p className="font-mono text-xs text-stone-400">
-                The game is stopped. You can change your Pomodoro timers or start Session #
-                {pomodoro.completedCycles + 1} now!
+                Session #{currentSession.sessionNumber} had{' '}
+                <strong>{currentSession.totalViolations} violations</strong>. You can change your Pomodoro timers or start the next session now!
               </p>
               <button
                 onClick={handleStartNextSession}
@@ -1066,7 +992,7 @@ export function App() {
           </div>
         )}
 
-        {/* ALWAYS-MOUNTED LIVE WEBCAM GUARD (Bottom-Left Corner: Green when Face on Screen, Red when Face Disappears) */}
+        {/* ALWAYS-MOUNTED LIVE WEBCAM GUARD */}
         <div className="absolute bottom-4 left-4 z-20">
           <WebcamGuard
             enabled={webcamEnabled}
@@ -1085,7 +1011,8 @@ export function App() {
             <div className="mb-2 flex items-center justify-between border-b border-stone-800 pb-1.5">
               <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-emerald-400">
                 {activePanel === 'pomodoro' && 'Pomodoro & Break'}
-                {activePanel === 'tabs' && 'Allowed Chrome Tabs'}
+                {activePanel === 'tabs' && 'Browser Tab Protection'}
+                {activePanel === 'log' && 'Session Violation Log'}
                 {activePanel === 'upgrades' && 'Room Skins & Upgrades'}
               </span>
               <button
@@ -1110,19 +1037,72 @@ export function App() {
 
             {activePanel === 'tabs' && (
               <AllowedTabsManager
-                allowedTabs={allowedTabs}
-                isWhitelistLocked={isWhitelistLocked}
-                isPomodoroRunning={pomodoro.isRunning}
-                activeAllowedTabId={activeAllowedTabId}
                 extensionConnected={extensionConnected}
-                onRequestExtensionSync={handleRequestExtensionSync}
-                onLockWhitelist={() => setIsWhitelistLocked(true)}
-                onUnlockWhitelistReset={() => setIsWhitelistLocked(false)}
-                onAddInitialTab={handleAddInitialTab}
-                onRemoveInitialTab={handleRemoveInitialTab}
-                onOpenLinkFromExistingTab={handleOpenLinkFromExistingTab}
-                onSwitchToAllowedTab={handleSwitchToAllowedTab}
+                allowedTabsCount={allowedTabsCount}
               />
+            )}
+
+            {activePanel === 'log' && (
+              <div className="flex flex-col gap-2.5 font-mono text-xs max-h-80 overflow-y-auto pr-0.5">
+                {/* Simple 3-Metric Summary for Current Session */}
+                <div className="grid grid-cols-3 gap-1.5 text-center">
+                  <div className="rounded-lg border border-stone-800 bg-stone-950 p-2">
+                    <div className="text-base font-extrabold text-rose-400">
+                      {currentSession.totalViolations}
+                    </div>
+                    <div className="text-[9px] text-stone-400">Total Red</div>
+                  </div>
+                  <div className="rounded-lg border border-stone-800 bg-stone-950 p-2">
+                    <div className="text-base font-extrabold text-amber-400">
+                      {currentSession.faceAwayCount}
+                    </div>
+                    <div className="text-[9px] text-stone-400">Face Away</div>
+                  </div>
+                  <div className="rounded-lg border border-stone-800 bg-stone-950 p-2">
+                    <div className="text-base font-extrabold text-rose-300">
+                      {currentSession.blockedNewTabCount}
+                    </div>
+                    <div className="text-[9px] text-stone-400">New Tab</div>
+                  </div>
+                </div>
+
+                {/* Per-Session Violation Log */}
+                {sessionsLog.map((sess) => (
+                  <div
+                    key={sess.sessionNumber}
+                    className="rounded-xl border border-stone-800 bg-stone-950 p-2.5 space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between border-b border-stone-800 pb-1 text-[10px]">
+                      <span className="font-bold text-emerald-400">
+                        Session #{sess.sessionNumber} ({sess.startedAt})
+                      </span>
+                      <span className="font-bold text-rose-400">
+                        {sess.totalViolations} violations
+                      </span>
+                    </div>
+
+                    {sess.events.length === 0 ? (
+                      <div className="py-1.5 text-center text-[10px] text-stone-500">
+                        0 violations — clean focus session!
+                      </div>
+                    ) : (
+                      <div className="space-y-1 max-h-36 overflow-y-auto">
+                        {sess.events.map((ev) => (
+                          <div
+                            key={ev.id}
+                            className="flex items-start justify-between gap-2 rounded bg-stone-900/90 px-2 py-1 text-[10px]"
+                          >
+                            <span className="text-rose-200">{ev.message}</span>
+                            <span className="shrink-0 text-[9px] text-stone-500">
+                              {ev.timestamp}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
             )}
 
             {activePanel === 'upgrades' && (

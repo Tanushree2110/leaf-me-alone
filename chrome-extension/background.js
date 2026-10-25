@@ -1,36 +1,25 @@
-// Leaf Me Alone — Strict Tab Guard Background Service Worker
-// - Records existing open tabs at start
-// - BLOCKS & CLOSES any manually opened New Tab (Cmd+T / + button / chrome://newtab)
-// - ONLY allows new tabs opened by clicking an actual <a href> link on an existing allowed tab!
+// Leaf Me Alone — Strict New-Tab Blocker Background Service Worker
+// Rule:
+// 1. All existing open tabs when the game opens are automatically allowed.
+// 2. Switching between existing tabs or closing existing tabs is 100% allowed.
+// 3. Opening a new tab by clicking a link from an existing tab is automatically allowed.
+// 4. Opening a standalone new tab (Cmd+T / '+' button) is BLOCKED & CLOSED and logged as a violation.
 
 let recentLinkClicks = [] // { tabId, url, timestamp }
 let allowedTabIds = new Set()
 let isInitialized = false
 
-async function initAllowedExistingTabs() {
+async function snapshotExistingTabs() {
   const tabs = await chrome.tabs.query({})
   allowedTabIds = new Set(tabs.map((t) => t.id).filter(Boolean))
   isInitialized = true
+  await sendToGameTabs({
+    type: 'LEAF_CHROME_GUARD_STATUS',
+    allowedCount: allowedTabIds.size,
+  })
 }
 
-initAllowedExistingTabs()
-
-async function getAllOpenChromeTabs() {
-  const tabs = await chrome.tabs.query({})
-  if (!isInitialized) {
-    tabs.forEach((t) => {
-      if (t.id) allowedTabIds.add(t.id)
-    })
-    isInitialized = true
-  }
-  return tabs.map((t) => ({
-    chromeTabId: t.id,
-    title: t.title || t.pendingUrl || t.url || 'Chrome Tab',
-    url: t.url || t.pendingUrl || '',
-    openerTabId: t.openerTabId || null,
-    active: Boolean(t.active),
-  }))
-}
+snapshotExistingTabs()
 
 async function sendToGameTabs(payload) {
   const allTabs = await chrome.tabs.query({})
@@ -44,16 +33,8 @@ async function sendToGameTabs(payload) {
   }
 }
 
-async function broadcastOpenTabsToGame() {
-  const formatted = await getAllOpenChromeTabs()
-  await sendToGameTabs({
-    type: 'LEAF_CHROME_TABS_SYNC',
-    tabs: formatted,
-  })
-}
-
-async function injectIntoExistingTabs() {
-  await initAllowedExistingTabs()
+async function injectScriptsIntoOpenTabs() {
+  await snapshotExistingTabs()
   const allTabs = await chrome.tabs.query({})
   for (const t of allTabs) {
     if (t.id && t.url && (t.url.includes('localhost:5173') || t.url.includes('127.0.0.1:5173'))) {
@@ -72,18 +53,18 @@ async function injectIntoExistingTabs() {
       } catch {}
     }
   }
-  broadcastOpenTabsToGame()
 }
 
-chrome.runtime.onInstalled.addListener(injectIntoExistingTabs)
-chrome.runtime.onStartup.addListener(injectIntoExistingTabs)
+chrome.runtime.onInstalled.addListener(injectScriptsIntoOpenTabs)
+chrome.runtime.onStartup.addListener(injectScriptsIntoOpenTabs)
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'LEAF_LINK_CLICKED_ON_TAB') {
     const senderTabId = sender?.tab?.id
-    if (senderTabId && allowedTabIds.has(senderTabId)) {
+    if (senderTabId) {
+      allowedTabIds.add(senderTabId)
       const now = Date.now()
-      recentLinkClicks = recentLinkClicks.filter((c) => now - c.timestamp < 5000)
+      recentLinkClicks = recentLinkClicks.filter((c) => now - c.timestamp < 8000)
       recentLinkClicks.push({
         tabId: senderTabId,
         url: msg.url,
@@ -100,30 +81,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
     sendToGameTabs({
       type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
-      attemptedUrl: 'New Tab (+ / Cmd+T)',
+      reason: 'Tried opening a standalone New Tab (+ / Cmd+T)',
     })
     sendResponse({ ok: true })
     return true
   }
 
   if (msg?.type === 'LEAF_REQUEST_CHROME_TABS') {
-    getAllOpenChromeTabs().then((formatted) => {
-      sendResponse({ ok: true, tabs: formatted })
-    })
-    return true
-  }
-
-  if (msg?.type === 'LEAF_RESET_INITIAL_TABS') {
-    initAllowedExistingTabs().then(() => {
-      broadcastOpenTabsToGame()
-      sendResponse({ ok: true })
-    })
-    return true
-  }
-
-  if (msg?.type === 'LEAF_ACTIVATE_CHROME_TAB' && msg.chromeTabId) {
-    chrome.tabs.update(Number(msg.chromeTabId), { active: true }).catch(() => {})
-    sendResponse({ ok: true })
+    if (!isInitialized) {
+      snapshotExistingTabs().then(() => {
+        sendResponse({ ok: true, allowedCount: allowedTabIds.size })
+      })
+    } else {
+      sendToGameTabs({
+        type: 'LEAF_CHROME_GUARD_STATUS',
+        allowedCount: allowedTabIds.size,
+      })
+      sendResponse({ ok: true, allowedCount: allowedTabIds.size })
+    }
     return true
   }
 })
@@ -132,7 +107,6 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   const now = Date.now()
   const targetUrl = tab.pendingUrl || tab.url || ''
 
-  // Always block chrome://newtab, about:blank, or empty new tabs
   const isManualBlankNewTab =
     !targetUrl ||
     targetUrl.startsWith('chrome://newtab') ||
@@ -140,27 +114,21 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     targetUrl.startsWith('edge://newtab') ||
     targetUrl === 'about:blank'
 
-  // STRICT CHECK: Must have been triggered by an actual <a href> link click on an existing allowed tab!
-  const matchedLinkClick = recentLinkClicks.some(
-    (c) => now - c.timestamp < 5000 && allowedTabIds.has(c.tabId)
-  )
+  // Allowed if opened from an existing tab (openerTabId) OR via a link click on an existing tab
+  const hasAllowedOpener = Boolean(tab.openerTabId && allowedTabIds.has(tab.openerTabId))
+  const matchedLinkClick = recentLinkClicks.some((c) => now - c.timestamp < 8000)
 
-  if (!isManualBlankNewTab && matchedLinkClick) {
+  if (!isManualBlankNewTab && (hasAllowedOpener || matchedLinkClick)) {
+    // ALLOWED: Opened from an existing tab!
     if (tab.id) {
       allowedTabIds.add(tab.id)
     }
     await sendToGameTabs({
-      type: 'LEAF_CHROME_LINK_TAB_ALLOWED',
-      tab: {
-        chromeTabId: tab.id,
-        title: tab.title || targetUrl || 'Linked Sub-Tab',
-        url: targetUrl,
-        openerTabId: tab.openerTabId || null,
-      },
+      type: 'LEAF_CHROME_GUARD_STATUS',
+      allowedCount: allowedTabIds.size,
     })
-    broadcastOpenTabsToGame()
   } else {
-    // IMMEDIATELY CLOSE THE NEW TAB!
+    // BLOCKED: Standalone New Tab! Close it immediately and notify the game!
     if (tab.id) {
       try {
         await chrome.tabs.remove(tab.id)
@@ -168,18 +136,16 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     }
     await sendToGameTabs({
       type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
-      attemptedUrl: targetUrl || 'New Tab (Cmd+T)',
+      reason: 'Blocked opening a standalone New Tab (only links from existing tabs allowed)',
     })
   }
 })
 
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
-  if (changeInfo.title || changeInfo.url || changeInfo.status === 'complete') {
-    broadcastOpenTabsToGame()
-  }
-})
-
+// Closing existing tabs is 100% allowed — just remove from set quietly
 chrome.tabs.onRemoved.addListener((tabId) => {
   allowedTabIds.delete(tabId)
-  broadcastOpenTabsToGame()
+  sendToGameTabs({
+    type: 'LEAF_CHROME_GUARD_STATUS',
+    allowedCount: allowedTabIds.size,
+  })
 })
