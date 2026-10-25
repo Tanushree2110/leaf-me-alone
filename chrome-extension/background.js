@@ -29,10 +29,21 @@ async function notifyBlockedNewTab(reason) {
       body: JSON.stringify({ reason }),
     })
   } catch {}
-  await sendToGameTabs({
-    type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
-    reason,
-  })
+  try {
+    const allTabs = await chrome.tabs.query({})
+    const gameTabs = allTabs.filter(
+      (t) => t.url && (t.url.includes('localhost:5173') || t.url.includes('127.0.0.1:5173'))
+    )
+    for (const gt of gameTabs) {
+      if (gt.id) {
+        chrome.tabs.update(gt.id, { active: true }).catch(() => {})
+        chrome.tabs.sendMessage(gt.id, {
+          type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
+          reason,
+        }).catch(() => {})
+      }
+    }
+  } catch {}
 }
 
 async function sendToGameTabs(payload) {

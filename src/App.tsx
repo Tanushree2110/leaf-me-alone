@@ -437,16 +437,6 @@ export function App() {
 
     const handleBlockedTabEvent = (reason?: string) => {
       if (Date.now() - lastDistractionMsRef.current < 800) return
-      // Snap focus back to the game tab in Chrome if we know its tab ID
-      if (gameChromeTabIdRef.current) {
-        window.postMessage(
-          {
-            type: 'LEAF_APP_ACTIVATE_TAB',
-            chromeTabId: gameChromeTabIdRef.current,
-          },
-          '*'
-        )
-      }
       triggerDistraction(
         reason || 'Blocked opening a standalone New Tab (+ / Cmd+T)',
         'blocked_new_tab'

@@ -1,17 +1,13 @@
-// Content script injected into http://localhost:5173/ to bridge Chrome Tab Blocker with Leaf Me Alone
+// Safe, zero-listener content bridge for Leaf Me Alone
+// Never attaches a window 'message' listener, so reloading the extension can never trigger "Extension context invalidated"
 
-function isExtensionContextValid() {
+;(function () {
   try {
-    return Boolean(typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id)
-  } catch {
-    return false
-  }
-}
+    if (typeof chrome === 'undefined' || !chrome.runtime || !chrome.runtime.id) return
 
-function requestGuardStatus() {
-  if (!isExtensionContextValid()) return
-  try {
-    chrome.runtime.sendMessage({ type: 'LEAF_REQUEST_CHROME_TABS' }, (response) => {
+    window.postMessage({ type: 'LEAF_EXTENSION_READY' }, '*')
+
+    chrome.runtime.sendMessage({ type: 'LEAF_REQUEST_CHROME_TABS' }, function (response) {
       try {
         if (chrome.runtime.lastError) return
         if (response && response.ok) {
@@ -23,28 +19,16 @@ function requestGuardStatus() {
             '*'
           )
         }
-      } catch {}
+      } catch (_e) {}
     })
-  } catch {}
-}
 
-if (isExtensionContextValid()) {
-  window.postMessage({ type: 'LEAF_EXTENSION_READY' }, '*')
-  requestGuardStatus()
-  setTimeout(requestGuardStatus, 500)
-
-  try {
-    chrome.runtime.onMessage.addListener((msg) => {
-      if (msg && msg.type) {
-        window.postMessage(msg, '*')
-      }
+    chrome.runtime.onMessage.addListener(function (msg) {
+      try {
+        if (!chrome.runtime || !chrome.runtime.id) return
+        if (msg && msg.type) {
+          window.postMessage(msg, '*')
+        }
+      } catch (_e) {}
     })
-  } catch {}
-}
-
-window.addEventListener('message', (event) => {
-  if (event.source !== window || !event.data) return
-  if (event.data.type === 'LEAF_APP_REQUEST_SYNC') {
-    requestGuardStatus()
-  }
-})
+  } catch (_e) {}
+})()
