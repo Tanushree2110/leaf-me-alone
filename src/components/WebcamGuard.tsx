@@ -5,7 +5,6 @@ import { CameraStatus } from '../types'
 
 interface WebcamGuardProps {
   enabled: boolean
-  onToggleEnabled: () => void
   status: CameraStatus
   onStatusChange: (status: CameraStatus) => void
   onPhoneDetected: () => void
@@ -46,8 +45,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [status, onStatusChange, onAwayDetected, onBackFocused])
 
-  // Initialize BOTH MediaPipe SelfieSegmenter (detects a human person/body at any angle)
-  // AND MediaPipe FaceDetector from local /wasm and /models
+  // Initialize MediaPipe SelfieSegmenter + FaceDetector from local /wasm and /models
   useEffect(() => {
     let cancelled = false
     async function initMediaPipe() {
@@ -92,11 +90,24 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [])
 
+  // Physically shut down webcam hardware tracks immediately when stopped or Pomodoro is off!
   const stopCamera = useCallback(() => {
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => t.stop())
+      streamRef.current.getTracks().forEach((t) => {
+        try {
+          t.stop()
+        } catch {}
+      })
       streamRef.current = null
     }
+    if (videoRef.current) {
+      try {
+        videoRef.current.pause()
+        videoRef.current.srcObject = null
+      } catch {}
+    }
+    hasTriggeredForCurrentAbsenceRef.current = false
+    missingStartMsRef.current = null
     callbacksRef.current.onStatusChange('off')
   }, [])
 
@@ -110,6 +121,11 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         video: { width: 320, height: 240, facingMode: 'user' },
         audio: false,
       })
+      // If Pomodoro was stopped while getUserMedia was resolving, immediately stop tracks!
+      if (!enabled) {
+        stream.getTracks().forEach((t) => t.stop())
+        return
+      }
       streamRef.current = stream
       if (videoRef.current) {
         videoRef.current.srcObject = stream
@@ -122,7 +138,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     } catch {
       callbacksRef.current.onStatusChange('permission_denied')
     }
-  }, [])
+  }, [enabled])
 
   useEffect(() => {
     if (enabled) {
@@ -138,7 +154,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [enabled, startCamera, stopCamera])
 
-  // Real-time Person & Face Presence Loop
+  // Real-time Person & Face Presence Loop (ONLY runs when enabled === true!)
   useEffect(() => {
     if (!enabled) return
 
@@ -188,7 +204,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         )
         lastTimestampMsRef.current = nowPerf
 
-        // 1. Check MediaPipe SelfieSegmenter (detects a human person in the camera even if looking down or sideways!)
+        // 1. Check MediaPipe SelfieSegmenter
         if (segmenterRef.current) {
           try {
             const segResult = segmenterRef.current.segmentForVideo(video, nowPerf)
@@ -201,8 +217,10 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
               const total = floatArr.length
 
               let personPixels = 0
-              let minX = mW, maxX = 0, minY = mH, maxY = 0
-              // Step by 4 pixels for super-fast evaluation
+              let minX = mW,
+                maxX = 0,
+                minY = mH,
+                maxY = 0
               for (let y = 0; y < mH; y += 2) {
                 const rowOff = y * mW
                 for (let x = 0; x < mW; x += 2) {
@@ -217,7 +235,6 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
               }
 
               const personAreaRatio = personPixels / Math.max(1, total)
-              // If at least 6% of the camera frame contains a human person -> Person is visible!
               if (personAreaRatio >= 0.06) {
                 personVisible = true
                 boxX = minX / mW
@@ -258,7 +275,6 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         } = callbacksRef.current
 
         if (!personVisible) {
-          // As soon as no person is visible on camera for 0.6s -> TURN RED immediately!
           if (!missingStartMsRef.current) missingStartMsRef.current = now
           const elapsed = (now - missingStartMsRef.current) / 1000
 
@@ -272,7 +288,6 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             }
           }
         } else {
-          // Person is visible on camera -> Immediately GREEN!
           missingStartMsRef.current = null
           hasTriggeredForCurrentAbsenceRef.current = false
           if (curStatus !== 'focused') {
@@ -281,7 +296,6 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           cbFocused()
         }
 
-        // Draw Green box when person is visible, or Red frame when no person is visible
         if (overlay) {
           const octx = overlay.getContext('2d')
           if (octx) {
@@ -319,6 +333,16 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
 
     return () => clearInterval(interval)
   }, [enabled, startCamera])
+
+  // When Pomodoro is stopped or OFF, camera is completely OFF!
+  if (!enabled) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-stone-800 bg-stone-900/90 px-3 py-2 font-mono text-[11px] text-stone-400 shadow-lg backdrop-blur-md">
+        <CameraOff className="h-3.5 w-3.5 text-stone-500" />
+        <span>Camera Off (Starts with Pomodoro)</span>
+      </div>
+    )
+  }
 
   const isRedState = status === 'away_detected' || status === 'phone_detected'
 
@@ -359,23 +383,14 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           autoPlay
           muted
           playsInline
-          className={`h-full w-full object-cover -scale-x-100 ${
-            enabled && status !== 'off' ? 'block' : 'hidden'
-          }`}
+          className="block h-full w-full object-cover -scale-x-100"
         />
         <canvas
           ref={overlayCanvasRef}
           width={128}
           height={96}
-          className={`pointer-events-none absolute inset-0 h-full w-full ${
-            enabled && status !== 'off' ? 'block' : 'hidden'
-          }`}
+          className="pointer-events-none absolute inset-0 block h-full w-full"
         />
-        {(!enabled || status === 'off' || status === 'permission_denied') && (
-          <div className="flex h-full w-full items-center justify-center text-stone-500">
-            <CameraOff className="h-4 w-4" />
-          </div>
-        )}
       </div>
     </div>
   )

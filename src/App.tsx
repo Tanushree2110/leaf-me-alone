@@ -183,8 +183,46 @@ export function App() {
   const [isPolaroidOpen, setIsPolaroidOpen] = useState<boolean>(false)
 
   // Webcam Guard State
-  const [webcamEnabled, setWebcamEnabled] = useState<boolean>(true)
-  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('focused')
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('off')
+
+  // Focus Guard & Camera are ONLY active when Pomodoro is ON, STARTED, and in FOCUS phase!
+  // When Stopped, on Break, or Pomodoro OFF -> Camera is OFF and NOTHING is prohibited!
+  const isFocusSessionActive = Boolean(
+    pomodoro.enabled && pomodoro.isRunning && pomodoro.phase === 'focus'
+  )
+
+  useEffect(() => {
+    fetch('/api/focus-guard-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: isFocusSessionActive }),
+    }).catch(() => {})
+
+    if (!isFocusSessionActive) {
+      setCurrentRedReason(null)
+      setFocusMode('locked_in')
+      setRoommateState('typing')
+    }
+  }, [isFocusSessionActive])
+
+  // If the user closes or leaves the game page, immediately turn off the tab-blocker guard on the server!
+  useEffect(() => {
+    const turnOffGuard = () => {
+      try {
+        const blob = new Blob([JSON.stringify({ active: false })], {
+          type: 'application/json',
+        })
+        navigator.sendBeacon('/api/focus-guard-state', blob)
+      } catch {}
+    }
+    window.addEventListener('pagehide', turnOffGuard)
+    window.addEventListener('beforeunload', turnOffGuard)
+    return () => {
+      turnOffGuard()
+      window.removeEventListener('pagehide', turnOffGuard)
+      window.removeEventListener('beforeunload', turnOffGuard)
+    }
+  }, [])
 
   // Chrome Tab Guard State
   const [extensionConnected, setExtensionConnected] = useState<boolean>(false)
@@ -248,10 +286,11 @@ export function App() {
   )
 
   const isRoughWeather =
-    cameraStatus === 'away_detected' ||
-    cameraStatus === 'phone_detected' ||
-    focusMode === 'distracted' ||
-    focusMode === 'last_leaf_climax'
+    isFocusSessionActive &&
+    (cameraStatus === 'away_detected' ||
+      cameraStatus === 'phone_detected' ||
+      focusMode === 'distracted' ||
+      focusMode === 'last_leaf_climax')
 
   // Sync Background Music (Soothing Pad whenever GREEN & Sound On vs Thunder Storm when RED)
   useEffect(() => {
@@ -334,17 +373,15 @@ export function App() {
     setStats((s) => ({ ...s, leavesGrown: s.leavesGrown + 1 }))
   }, [vineSegments])
 
-  // Trigger a Violation (ONLY from: 1. Face Away on Camera >=3s, or 2. Blocked Standalone New Tab!)
+  // Trigger a Violation ONLY when Pomodoro Focus is actively started!
+  // When Stopped or Pomodoro OFF, nothing is prohibited and 0 violations are counted!
   const triggerDistraction = useCallback(
     (
       reason: string,
       category: 'face_away' | 'blocked_new_tab',
       customQuotes?: string[]
     ) => {
-      if (
-        pomodoro.enabled &&
-        (pomodoro.phase === 'break' || pomodoro.phase === 'awaiting_next_session')
-      ) {
+      if (!isFocusSessionActive) {
         return
       }
 
@@ -425,7 +462,7 @@ export function App() {
         roomTempCelsius: Math.max(7, prev.roomTempCelsius - 3.5),
       }))
     },
-    [leaves, vineSegments, pomodoro.enabled, pomodoro.phase, recordViolationInCurrentSession]
+    [leaves, vineSegments, isFocusSessionActive, recordViolationInCurrentSession]
   )
 
   // Listen to Chrome Extension events (compatible with both v1.0 and v1.3 of the extension!) + Vite WS bridge
@@ -584,10 +621,9 @@ export function App() {
     }
   }, [triggerDistraction])
 
-  // Block Cmd+T / Cmd+N AND block moving off from Google Chrome to another desktop app!
-  // Switching between or closing your existing tabs inside Chrome sets document.hidden = true, which is 100% ALLOWED.
-  // Moving off from Chrome to another app leaves document.hidden === false while document.hasFocus() becomes false!
+  // Block Cmd+T / Cmd+N AND block moving off from Google Chrome to another desktop app ONLY when Pomodoro is started!
   useEffect(() => {
+    if (!isFocusSessionActive) return
     if (typeof navigator !== 'undefined' && /Electron|Cursor/i.test(navigator.userAgent)) {
       return
     }
@@ -613,7 +649,6 @@ export function App() {
     const handleWindowBlur = () => {
       if (blurCheckTimeout) clearTimeout(blurCheckTimeout)
       blurCheckTimeout = setTimeout(() => {
-        // If document.hidden is false but document.hasFocus() is false, the user left Chrome for another app!
         if (!document.hidden && !document.hasFocus()) {
           triggerDistraction(
             'Moved off from Google Chrome to another app!',
@@ -639,7 +674,7 @@ export function App() {
       window.removeEventListener('blur', handleWindowBlur)
       window.removeEventListener('focus', handleWindowFocus)
     }
-  }, [triggerDistraction])
+  }, [isFocusSessionActive, triggerDistraction])
 
   const handlePhoneDetected = useCallback(() => {
     triggerDistraction(
@@ -822,10 +857,9 @@ export function App() {
         })
       }
 
-      if (pomodoro.enabled && pomodoro.phase !== 'focus') return
+      if (!isFocusSessionActive) return
 
       const isCameraFocused =
-        !webcamEnabled ||
         cameraStatus === 'focused' ||
         cameraStatus === 'initializing' ||
         cameraStatus === 'permission_denied'
@@ -869,7 +903,7 @@ export function App() {
     return () => clearInterval(timer)
   }, [
     focusMode,
-    webcamEnabled,
+    isFocusSessionActive,
     cameraStatus,
     stats.speedMultiplier,
     pomodoro.enabled,
@@ -1156,11 +1190,10 @@ export function App() {
           </div>
         )}
 
-        {/* ALWAYS-MOUNTED LIVE WEBCAM GUARD */}
+        {/* WEBCAM GUARD (Active ONLY when Pomodoro Focus is started; OFF when Stopped or Pomodoro Off) */}
         <div className="absolute bottom-4 left-4 z-20">
           <WebcamGuard
-            enabled={webcamEnabled}
-            onToggleEnabled={() => setWebcamEnabled((v) => !v)}
+            enabled={isFocusSessionActive}
             status={cameraStatus}
             onStatusChange={setCameraStatus}
             onPhoneDetected={handlePhoneDetected}

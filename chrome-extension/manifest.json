@@ -1,13 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Leaf Me Alone — Strict Tab Guard",
-  "version": "1.3.0",
-  "description": "Blocks opening new tabs (Cmd+T / +) during focus; only allows tabs opened by clicking links on existing allowed tabs.",
+  "version": "1.4.0",
+  "description": "Blocks opening new tabs (Cmd+T / +) ONLY while Pomodoro Focus is running; allows links from existing tabs.",
   "permissions": ["tabs", "scripting"],
   "host_permissions": ["<all_urls>"],
-  "chrome_url_overrides": {
-    "newtab": "blocked.html"
-  },
   "background": {
     "service_worker": "background.js"
   },

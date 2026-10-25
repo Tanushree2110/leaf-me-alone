@@ -1,14 +1,31 @@
 // Leaf Me Alone — Strict New-Tab & New-Window Blocker Background Service Worker
-// Rule:
-// 1. All existing open tabs & windows when the game opens are automatically allowed.
-// 2. Switching between existing tabs or closing existing tabs is 100% allowed.
-// 3. Opening a new tab by clicking a link from an existing tab is automatically allowed.
-// 4. Opening a standalone new tab (Cmd+T / '+') OR a new window (Cmd+N) is BLOCKED & CLOSED and logged as a violation.
+// ONLY enforces restrictions while Pomodoro is STARTED (active=true).
+// When Pomodoro is STOPPED (active=false), nothing is prohibited!
 
 let recentLinkClicks = [] // { tabId, url, timestamp }
 let allowedTabIds = new Set()
 let allowedWindowIds = new Set()
 let isInitialized = false
+let isGuardActive = false
+
+async function syncGuardActiveFromServer() {
+  try {
+    const res = await fetch('http://localhost:5173/api/focus-guard-state')
+    const data = await res.json()
+    const nextActive = Boolean(data && data.active)
+    if (nextActive && !isGuardActive) {
+      // Pomodoro just started -> Snapshot all currently open tabs & windows as allowed!
+      await snapshotExistingTabs()
+    }
+    isGuardActive = nextActive
+    return isGuardActive
+  } catch {
+    isGuardActive = false
+    return false
+  }
+}
+
+setInterval(syncGuardActiveFromServer, 1000)
 
 async function snapshotExistingTabs() {
   const tabs = await chrome.tabs.query({})
@@ -24,6 +41,9 @@ async function snapshotExistingTabs() {
 snapshotExistingTabs()
 
 async function notifyBlockedAction(reason) {
+  const active = await syncGuardActiveFromServer()
+  if (!active) return
+
   try {
     await fetch('http://localhost:5173/api/new-tab-blocked', {
       method: 'POST',
@@ -90,9 +110,14 @@ async function injectScriptsIntoOpenTabs() {
 chrome.runtime.onInstalled.addListener(injectScriptsIntoOpenTabs)
 chrome.runtime.onStartup.addListener(injectScriptsIntoOpenTabs)
 
-// BLOCK OPENING ANY NEW BROWSER WINDOW (Cmd+N / New Window) OR MOVING OFF FROM CHROME!
+// BLOCK OPENING ANY NEW BROWSER WINDOW OR MOVING OFF FROM CHROME (ONLY WHEN POMODORO IS RUNNING!)
 if (chrome.windows && chrome.windows.onCreated) {
   chrome.windows.onCreated.addListener(async (win) => {
+    const active = await syncGuardActiveFromServer()
+    if (!active) {
+      if (win && win.id) allowedWindowIds.add(win.id)
+      return
+    }
     if (win && win.id && !allowedWindowIds.has(win.id)) {
       try {
         await chrome.windows.remove(win.id)
@@ -106,6 +131,8 @@ let lastChromeBlurAlertMs = 0
 if (chrome.windows && chrome.windows.onFocusChanged) {
   chrome.windows.onFocusChanged.addListener(async (windowId) => {
     if (windowId === chrome.windows.WINDOW_ID_NONE) {
+      const active = await syncGuardActiveFromServer()
+      if (!active) return
       const now = Date.now()
       if (now - lastChromeBlurAlertMs < 1500) return
       lastChromeBlurAlertMs = now
@@ -132,35 +159,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg?.type === 'LEAF_NEW_TAB_OVERRIDE_TRIGGERED') {
-    if (sender?.tab?.id) {
-      chrome.tabs.remove(sender.tab.id).catch(() => {})
-    }
-    notifyBlockedAction('Blocked opening a standalone New Tab (+ / Cmd+T)!')
-    sendResponse({ ok: true })
+    syncGuardActiveFromServer().then((active) => {
+      if (!active) {
+        sendResponse({ ok: true })
+        return
+      }
+      if (sender?.tab?.id) {
+        chrome.tabs.remove(sender.tab.id).catch(() => {})
+      }
+      notifyBlockedAction('Blocked opening a standalone New Tab (+ / Cmd+T)!')
+      sendResponse({ ok: true })
+    })
     return true
   }
 
   if (msg?.type === 'LEAF_REQUEST_CHROME_TABS') {
-    if (!isInitialized) {
-      snapshotExistingTabs().then(() => {
-        sendResponse({ ok: true, allowedCount: allowedTabIds.size })
-      })
-    } else {
-      sendToGameTabs({
-        type: 'LEAF_CHROME_GUARD_STATUS',
-        allowedCount: allowedTabIds.size,
-      })
+    snapshotExistingTabs().then(() => {
       sendResponse({ ok: true, allowedCount: allowedTabIds.size })
-    }
+    })
     return true
   }
 })
 
 chrome.tabs.onCreated.addListener(async (tab) => {
+  const active = await syncGuardActiveFromServer()
+  if (!active) {
+    // Pomodoro is STOPPED -> Allow opening any tab or window freely!
+    if (tab.id) allowedTabIds.add(tab.id)
+    if (tab.windowId) allowedWindowIds.add(tab.windowId)
+    await sendToGameTabs({
+      type: 'LEAF_CHROME_GUARD_STATUS',
+      allowedCount: allowedTabIds.size,
+    })
+    return
+  }
+
   const now = Date.now()
   const targetUrl = tab.pendingUrl || tab.url || ''
 
-  // If this tab was created in a brand-new unauthorized window, close the whole window!
   if (tab.windowId && isInitialized && !allowedWindowIds.has(tab.windowId)) {
     try {
       await chrome.windows.remove(tab.windowId)
