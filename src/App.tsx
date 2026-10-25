@@ -190,12 +190,18 @@ export function App() {
   const isFocusSessionActive = Boolean(
     pomodoro.enabled && pomodoro.isRunning && pomodoro.phase === 'focus'
   )
+  const isFocusSessionActiveRef = useRef<boolean>(isFocusSessionActive)
+  isFocusSessionActiveRef.current = isFocusSessionActive
 
   useEffect(() => {
+    if (typeof navigator !== 'undefined' && /Electron|Cursor/i.test(navigator.userAgent)) {
+      return
+    }
     fetch('/api/focus-guard-state', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ active: isFocusSessionActive }),
+      cache: 'no-store',
     }).catch(() => {})
 
     if (!isFocusSessionActive) {
@@ -207,6 +213,9 @@ export function App() {
 
   // If the user closes or leaves the game page, immediately turn off the tab-blocker guard on the server!
   useEffect(() => {
+    if (typeof navigator !== 'undefined' && /Electron|Cursor/i.test(navigator.userAgent)) {
+      return
+    }
     const turnOffGuard = () => {
       try {
         const blob = new Blob([JSON.stringify({ active: false })], {
@@ -381,7 +390,7 @@ export function App() {
       category: 'face_away' | 'blocked_new_tab',
       customQuotes?: string[]
     ) => {
-      if (!isFocusSessionActive) {
+      if (!isFocusSessionActiveRef.current) {
         return
       }
 
@@ -474,6 +483,7 @@ export function App() {
     let lastHandledBlockCount = 0
 
     const handleBlockedTabEvent = (reason?: string) => {
+      if (!isFocusSessionActiveRef.current) return
       if (Date.now() - lastDistractionMsRef.current < 250) return
       triggerDistraction(
         reason || 'Blocked opening a standalone New Tab / Window (+ / Cmd+T / Cmd+N)',
@@ -757,6 +767,13 @@ export function App() {
   }, [pomodoro.enabled, pomodoro.focusMinutes, pomodoro.leavesPerCycle])
 
   const handleStartPomodoroSession = useCallback(() => {
+    isFocusSessionActiveRef.current = true
+    fetch('/api/focus-guard-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: true }),
+      cache: 'no-store',
+    }).catch(() => {})
     soundFX.playPomodoroBell()
     setCurrentRedReason(null)
     setFocusMode('locked_in')
@@ -771,10 +788,19 @@ export function App() {
   }, [pomodoro.focusMinutes])
 
   const handleStopPomodoroSession = useCallback(() => {
+    isFocusSessionActiveRef.current = false
+    fetch('/api/focus-guard-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: false }),
+      cache: 'no-store',
+    }).catch(() => {})
     leafAccumulatorSecRef.current = 0
     setNextLeafProgress(0)
     setCurrentRedReason(null)
-    setDialogueText('Pomodoro stopped. You can now switch or select your Pomodoro timers.')
+    setFocusMode('locked_in')
+    setRoommateState('typing')
+    setDialogueText('Pomodoro stopped. Camera is off and nothing is prohibited!')
     setPomodoro((prev) => ({
       ...prev,
       phase: 'focus',

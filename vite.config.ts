@@ -14,6 +14,7 @@ export default defineConfig({
       configureServer(server) {
         server.middlewares.use('/api/audio-state', (req, res) => {
           res.setHeader('Content-Type', 'application/json')
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
           if (req.method === 'POST') {
             let body = ''
             req.on('data', (chunk) => {
@@ -43,6 +44,7 @@ export default defineConfig({
           res.setHeader('Access-Control-Allow-Origin', '*')
           res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
           res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
           res.setHeader('Content-Type', 'application/json')
 
           if (req.method === 'OPTIONS') {
@@ -71,11 +73,12 @@ export default defineConfig({
           res.end(JSON.stringify({ ok: true, active: isFocusGuardActive }))
         })
 
-        // Direct bridge so the Chrome Extension background worker or blocked.html can notify the game ONLY when guard is active!
+        // Direct bridge so the Chrome Extension background worker can notify the game ONLY when guard is active!
         server.middlewares.use('/api/new-tab-blocked', (req, res) => {
           res.setHeader('Access-Control-Allow-Origin', '*')
           res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
           res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+          res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
           res.setHeader('Content-Type', 'application/json')
 
           if (req.method === 'OPTIONS') {

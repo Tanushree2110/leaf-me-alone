@@ -1,14 +1,15 @@
-// Leaf Me Alone — Safe Focus Tab Guard (v1.5.0)
-// SAFETY GUARANTEES:
-// 1. NEVER closes any tab or window unless http://localhost:5173 is currently open in Chrome!
-// 2. NEVER closes the last remaining tab in a window (impossible to lock you out of Chrome!).
-// 3. NEVER blocks anything when Pomodoro is Stopped or Off!
-// 4. When localhost:5173 IS open AND Pomodoro is Started:
+// Leaf Me Alone — Safe Focus Tab Guard (v1.6.0)
+// STRICTLY GATED BY POMODORO START/STOP:
+// 1. If localhost:5173 is NOT open in Chrome -> DO NOTHING (allow all tabs, windows, and apps).
+// 2. If Pomodoro is STOPPED, OFF, or on BREAK (/api/focus-guard-state active === false) -> DO NOTHING!
+// 3. ONLY when localhost:5173 IS open AND Pomodoro Focus is STARTED (active === true):
 //    - Blocks standalone New Tabs (+ / Cmd+T) and New Windows (Cmd+N)
+//    - Logs a violation if you drift away from Chrome to another app
 //    - Allows switching/closing existing tabs and opening links clicked inside existing tabs.
 
 let recentLinkClicks = [] // { tabId, url, timestamp }
 let allowedTabIds = new Set()
+let allowedWindowIds = new Set()
 let wasGuardActive = false
 
 async function getGameAndGuardState() {
@@ -19,20 +20,23 @@ async function getGameAndGuardState() {
       return u.includes('localhost:5173') || u.includes('127.0.0.1:5173')
     })
 
-    // SAFETY GUARANTEE #1: If localhost:5173 is NOT open in Chrome, NEVER block anything!
+    // 1. If localhost:5173 is NOT open in Chrome, NEVER block anything!
     if (!gameTab) {
       wasGuardActive = false
       return { active: false, gameTab: null, allTabs }
     }
 
-    // Check if Pomodoro Focus is currently running on localhost:5173
-    const res = await fetch('http://localhost:5173/api/focus-guard-state')
+    // 2. Check live Pomodoro state on localhost:5173 (with cache: 'no-store' so it is never stale!)
+    const res = await fetch('http://localhost:5173/api/focus-guard-state', {
+      cache: 'no-store',
+    })
     const data = await res.json()
     const isRunning = Boolean(data && data.active)
 
     if (isRunning && !wasGuardActive) {
-      // Pomodoro just started -> Snapshot all currently open tabs as allowed!
+      // Pomodoro just started -> Snapshot all currently open tabs & windows as allowed!
       allowedTabIds = new Set(allTabs.map((t) => t.id).filter(Boolean))
+      allowedWindowIds = new Set(allTabs.map((t) => t.windowId).filter(Boolean))
     }
     wasGuardActive = isRunning
 
@@ -43,21 +47,21 @@ async function getGameAndGuardState() {
   }
 }
 
-async function notifyViolationToGame(gameTab, reason) {
+async function notifyViolationToGame(gameTab, reason, refocusGameTab) {
   try {
     await fetch('http://localhost:5173/api/new-tab-blocked', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ reason }),
+      cache: 'no-store',
     })
   } catch {}
 
   if (gameTab && gameTab.id) {
     try {
-      if (gameTab.windowId) {
-        await chrome.windows.update(gameTab.windowId, { focused: true })
+      if (refocusGameTab) {
+        await chrome.tabs.update(gameTab.id, { active: true })
       }
-      await chrome.tabs.update(gameTab.id, { active: true })
       await chrome.tabs.sendMessage(gameTab.id, {
         type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
         reason,
@@ -87,6 +91,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.tabs.query({}).then((allTabs) => {
       allTabs.forEach((t) => {
         if (t.id) allowedTabIds.add(t.id)
+        if (t.windowId) allowedWindowIds.add(t.windowId)
       })
       sendResponse({ ok: true, allowedCount: allowedTabIds.size })
     })
@@ -94,16 +99,38 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 })
 
+// Detect drifting away from Chrome to another desktop app ONLY when Pomodoro is started!
+let lastChromeBlurAlertMs = 0
+if (chrome.windows && chrome.windows.onFocusChanged) {
+  chrome.windows.onFocusChanged.addListener(async (windowId) => {
+    if (windowId === chrome.windows.WINDOW_ID_NONE) {
+      const { active, gameTab } = await getGameAndGuardState()
+      // When Pomodoro is Stopped or game is closed -> Do nothing! Allow switching apps freely!
+      if (!active || !gameTab) return
+
+      const now = Date.now()
+      if (now - lastChromeBlurAlertMs < 2000) return
+      lastChromeBlurAlertMs = now
+      await notifyViolationToGame(
+        gameTab,
+        'Moved off from Google Chrome to another app!',
+        false
+      )
+    }
+  })
+}
+
 chrome.tabs.onCreated.addListener(async (tab) => {
   const { active, gameTab, allTabs } = await getGameAndGuardState()
 
-  // If game is closed OR Pomodoro is stopped -> Allow everything freely!
+  // When Pomodoro is Stopped or game is closed -> Allow opening any tab or window freely!
   if (!active || !gameTab) {
     if (tab.id) allowedTabIds.add(tab.id)
+    if (tab.windowId) allowedWindowIds.add(tab.windowId)
     return
   }
 
-  // SAFETY GUARANTEE #2: Never close if there is only 1 tab open!
+  // Never close if there is only 1 tab open in Chrome
   if (allTabs.length <= 1) {
     if (tab.id) allowedTabIds.add(tab.id)
     return
@@ -112,14 +139,18 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   const now = Date.now()
   const targetUrl = tab.pendingUrl || tab.url || ''
 
-  // Did the user open a brand-new second Chrome window while the game window was already open?
+  // Did the user open a brand-new second Chrome window while Pomodoro is running?
   if (tab.windowId && gameTab.windowId && tab.windowId !== gameTab.windowId) {
     if (tab.id) {
       try {
         await chrome.tabs.remove(tab.id)
       } catch {}
     }
-    await notifyViolationToGame(gameTab, 'Blocked opening a New Browser Window (Cmd+N)!')
+    await notifyViolationToGame(
+      gameTab,
+      'Blocked opening a New Browser Window (Cmd+N)!',
+      true
+    )
     return
   }
 
@@ -135,7 +166,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     // ALLOWED: Opened by clicking a link on an existing tab!
     if (tab.id) allowedTabIds.add(tab.id)
   } else {
-    // BLOCKED: Standalone New Tab (+ / Cmd+T)! Close ONLY this new tab and switch back to the game tab!
+    // BLOCKED: Standalone New Tab (+ / Cmd+T) while Pomodoro is running!
     if (tab.id && tab.id !== gameTab.id) {
       try {
         await chrome.tabs.remove(tab.id)
@@ -143,7 +174,8 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     }
     await notifyViolationToGame(
       gameTab,
-      'Blocked opening a standalone New Tab (only links from existing tabs allowed)!'
+      'Blocked opening a standalone New Tab (only links from existing tabs allowed)!',
+      true
     )
   }
 })
