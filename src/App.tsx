@@ -401,110 +401,7 @@ export function App() {
     [appendLog, vineSegments, pomodoro.enabled, pomodoro.phase, pomodoro.isRunning]
   )
 
-  const seenLockedChromeTabIdsRef = useRef<Set<string>>(new Set())
-
-  // Automatically read all open tabs from Google Chrome via local Vite `/api/chrome-tabs` bridge
-  const syncLiveChromeTabs = useCallback(async () => {
-    try {
-      const res = await fetch('/api/chrome-tabs')
-      const data = await res.json()
-      if (!data || !data.ok || !Array.isArray(data.tabs) || data.tabs.length === 0) return
-
-      setExtensionConnected(true)
-
-      const liveTabs = data.tabs as Array<{
-        chromeTabId: string
-        windowIndex: number
-        tabIndex: number
-        title: string
-        url: string
-        active: boolean
-      }>
-
-      const activeLive = liveTabs.find((t) => t.active)
-      if (activeLive) {
-        setActiveAllowedTabId(`chrome-${activeLive.chromeTabId}`)
-      }
-
-      if (!isWhitelistLocked) {
-        // When unlocked, automatically populate with all currently open Chrome tabs!
-        const synced: AllowedTab[] = liveTabs.map((t) => ({
-          id: `chrome-${t.chromeTabId}`,
-          chromeTabId: t.chromeTabId,
-          windowIndex: t.windowIndex,
-          tabIndex: t.tabIndex,
-          title: t.title,
-          url: t.url,
-          isActive: t.active,
-        }))
-        setAllowedTabs(synced)
-        seenLockedChromeTabIdsRef.current = new Set(liveTabs.map((t) => String(t.chromeTabId)))
-      } else {
-        // When locked, check if any brand-new unapproved Chrome tab was opened!
-        setAllowedTabs((prev) => {
-          const allowedChromeIds = new Set(prev.map((p) => String(p.chromeTabId || '')))
-          const allowedDomains = new Set(
-            prev
-              .map((p) => {
-                try {
-                  return new URL(p.url).hostname.replace(/^www\./, '')
-                } catch {
-                  return ''
-                }
-              })
-              .filter(Boolean)
-          )
-
-          let updated = [...prev]
-          for (const lt of liveTabs) {
-            const cid = String(lt.chromeTabId)
-            if (allowedChromeIds.has(cid) || seenLockedChromeTabIdsRef.current.has(cid)) {
-              // Keep title/url updated for existing allowed tabs
-              updated = updated.map((item) =>
-                String(item.chromeTabId) === cid
-                  ? { ...item, title: lt.title, url: lt.url, windowIndex: lt.windowIndex, tabIndex: lt.tabIndex }
-                  : item
-              )
-              continue
-            }
-
-            // Newly opened Chrome tab while locked!
-            seenLockedChromeTabIdsRef.current.add(cid)
-            let newDomain = ''
-            try {
-              newDomain = new URL(lt.url).hostname.replace(/^www\./, '')
-            } catch {}
-
-            // If it shares a domain with an allowed tab, auto-branch it as an expanded sub-tab!
-            const matchingParent = prev.find((p) => {
-              try {
-                return newDomain && new URL(p.url).hostname.replace(/^www\./, '') === newDomain
-              } catch {
-                return false
-              }
-            })
-
-            if (matchingParent) {
-              updated.push({
-                id: `chrome-${cid}`,
-                chromeTabId: cid,
-                windowIndex: lt.windowIndex,
-                tabIndex: lt.tabIndex,
-                title: lt.title,
-                url: lt.url,
-                parentId: matchingParent.id,
-              })
-            } else if (lt.url && !lt.url.startsWith('chrome://newtab')) {
-              triggerDistraction(`Opened unapproved new Chrome tab: "${lt.title}"`)
-            }
-          }
-          return updated
-        })
-      }
-    } catch {}
-  }, [isWhitelistLocked, triggerDistraction])
-
-  // Also listen to Chrome Extension postMessage events (instant real-time sync in Chrome!)
+  // Listen to Chrome Extension postMessage events (instant real-time sync inside Chrome!)
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== window || !event.data) return
@@ -569,15 +466,8 @@ export function App() {
     return () => window.removeEventListener('message', handleMessage)
   }, [isWhitelistLocked, triggerDistraction])
 
-  useEffect(() => {
-    syncLiveChromeTabs()
-    const interval = setInterval(syncLiveChromeTabs, 3000)
-    return () => clearInterval(interval)
-  }, [syncLiveChromeTabs])
-
   const handleRequestExtensionSync = () => {
     soundFX.playSoftClick()
-    syncLiveChromeTabs()
     window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
   }
 
@@ -589,12 +479,11 @@ export function App() {
       authorizedTabSwitches: prev.authorizedTabSwitches + 1,
     }))
 
-    if (tab.windowIndex && tab.tabIndex) {
-      fetch('/api/chrome-tabs', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ windowIndex: tab.windowIndex, tabIndex: tab.tabIndex }),
-      }).catch(() => {})
+    if (tab.chromeTabId && extensionConnected) {
+      window.postMessage(
+        { type: 'LEAF_APP_ACTIVATE_TAB', chromeTabId: tab.chromeTabId },
+        '*'
+      )
       return
     }
 
