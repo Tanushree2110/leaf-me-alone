@@ -5,6 +5,7 @@
   "description": "A melodramatic desktop roommate & procedural plant whose survival depends on your focus.",
   "type": "module",
   "scripts": {
+    "start": "vite --port 5173 --open",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview"

@@ -463,7 +463,16 @@ export function App() {
     }
 
     window.addEventListener('message', handleMessage)
-    return () => window.removeEventListener('message', handleMessage)
+    // Automatically request open Chrome tabs on mount and every 3s
+    window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
+    const syncTimer = setInterval(() => {
+      window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
+    }, 3000)
+
+    return () => {
+      window.removeEventListener('message', handleMessage)
+      clearInterval(syncTimer)
+    }
   }, [isWhitelistLocked, triggerDistraction])
 
   const handleRequestExtensionSync = () => {
