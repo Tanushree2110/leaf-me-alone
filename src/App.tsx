@@ -504,9 +504,74 @@ export function App() {
     } catch {}
   }, [isWhitelistLocked, triggerDistraction])
 
+  // Also listen to Chrome Extension postMessage events (instant real-time sync in Chrome!)
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.source !== window || !event.data) return
+      const data = event.data
+
+      if (data.type === 'LEAF_EXTENSION_READY') {
+        setExtensionConnected(true)
+      }
+
+      if (data.type === 'LEAF_CHROME_TABS_SYNC' && Array.isArray(data.tabs)) {
+        setExtensionConnected(true)
+        const liveTabs = data.tabs as Array<{
+          chromeTabId: number
+          title: string
+          url: string
+          active: boolean
+        }>
+        const activeLive = liveTabs.find((t) => t.active)
+        if (activeLive) {
+          setActiveAllowedTabId(`chrome-${activeLive.chromeTabId}`)
+        }
+        if (!isWhitelistLocked && liveTabs.length > 0) {
+          setAllowedTabs(
+            liveTabs.map((t) => ({
+              id: `chrome-${t.chromeTabId}`,
+              chromeTabId: t.chromeTabId,
+              title: t.title,
+              url: t.url,
+              isActive: t.active,
+            }))
+          )
+        }
+      }
+
+      if (data.type === 'LEAF_CHROME_TAB_CREATED' && data.tab && isWhitelistLocked) {
+        const newTab = data.tab
+        setAllowedTabs((prev) => {
+          const parent = prev.find(
+            (p) => p.chromeTabId && String(p.chromeTabId) === String(newTab.openerTabId)
+          )
+          if (parent) {
+            return [
+              ...prev,
+              {
+                id: `chrome-${newTab.chromeTabId}`,
+                chromeTabId: newTab.chromeTabId,
+                title: newTab.title || 'Sub-tab',
+                url: newTab.url || '',
+                parentId: parent.id,
+              },
+            ]
+          }
+          if (newTab.url && !newTab.url.startsWith('chrome://newtab')) {
+            triggerDistraction(`Opened unapproved new Chrome tab "${newTab.title}"`)
+          }
+          return prev
+        })
+      }
+    }
+
+    window.addEventListener('message', handleMessage)
+    return () => window.removeEventListener('message', handleMessage)
+  }, [isWhitelistLocked, triggerDistraction])
+
   useEffect(() => {
     syncLiveChromeTabs()
-    const interval = setInterval(syncLiveChromeTabs, 2500)
+    const interval = setInterval(syncLiveChromeTabs, 3000)
     return () => clearInterval(interval)
   }, [syncLiveChromeTabs])
 

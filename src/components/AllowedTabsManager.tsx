@@ -5,6 +5,7 @@ import {
   GitBranch,
   Lock,
   Plus,
+  Puzzle,
   RefreshCw,
   Trash2,
   Unlock,
@@ -25,6 +26,9 @@ interface AllowedTabsManagerProps {
   onSwitchToAllowedTab: (tab: AllowedTab, openNewWindow?: boolean) => void
 }
 
+const EXTENSION_FOLDER_PATH =
+  '/Users/tanushree/stupid-project-ideas/leaf-me-alone/chrome-extension'
+
 export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
   allowedTabs,
   isWhitelistLocked,
@@ -41,6 +45,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
   const [newTitle, setNewTitle] = useState('')
   const [expandingParentId, setExpandingParentId] = useState<string | null>(null)
   const [expandTitle, setExpandTitle] = useState('')
+  const [copiedPath, setCopiedPath] = useState(false)
 
   const rootTabs = allowedTabs.filter((t) => !t.parentId)
   const getChildren = (parentId: string) =>
@@ -79,17 +84,26 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
     setExpandingParentId(null)
   }
 
+  const handleCopyExtensionPath = () => {
+    navigator.clipboard.writeText(EXTENSION_FOLDER_PATH)
+    setCopiedPath(true)
+    setTimeout(() => setCopiedPath(false), 2500)
+  }
+
   return (
     <div className="flex flex-col gap-2 text-xs font-mono">
       {/* Top Action Row */}
       <div className="flex items-center justify-between gap-2">
         <button
           onClick={onRequestExtensionSync}
-          className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800 px-2 py-1 text-[10px] font-semibold text-stone-300 hover:bg-stone-700"
-          title="Sync open Chrome tabs via companion extension"
+          className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-semibold transition ${
+            extensionConnected
+              ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300'
+              : 'border-stone-700 bg-stone-800 text-stone-300 hover:bg-stone-700'
+          }`}
         >
           <RefreshCw className="h-3 w-3 text-emerald-400" />
-          {extensionConnected ? 'Synced with Chrome' : 'Sync Chrome'}
+          {extensionConnected ? 'Auto-Synced with Chrome' : 'Sync Chrome Tabs'}
         </button>
 
         {!isWhitelistLocked ? (
@@ -106,10 +120,32 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
             className="flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-[10px] font-bold text-amber-300 hover:bg-amber-500/20"
           >
             <Unlock className="h-3 w-3" />
-            Locked (Click to Edit)
+            Locked (Edit)
           </button>
         )}
       </div>
+
+      {/* 1-Click Chrome Extension Setup Banner if not yet connected */}
+      {!extensionConnected && (
+        <div className="rounded-lg border border-sky-500/30 bg-sky-950/30 p-2 text-[10px] text-sky-200 leading-snug">
+          <div className="flex items-center justify-between font-bold text-sky-300 mb-1">
+            <span className="flex items-center gap-1">
+              <Puzzle className="h-3 w-3" /> Auto-Read All Chrome Tabs:
+            </span>
+            <button
+              onClick={handleCopyExtensionPath}
+              className="rounded bg-sky-600 px-2 py-0.5 text-[9.5px] font-bold text-white hover:bg-sky-500"
+            >
+              {copiedPath ? '✓ Copied Folder Path!' : 'Copy Extension Folder'}
+            </button>
+          </div>
+          <div className="text-[9.5px] text-stone-300">
+            1. Open <span className="text-sky-300 font-semibold">chrome://extensions</span> in Chrome
+            <br />
+            2. Enable <strong>Developer mode</strong> (top right) → <strong>Load unpacked</strong> → paste copied folder path!
+          </div>
+        </div>
+      )}
 
       {/* Add Initial Chrome Tab Input (Only when unlocked) */}
       {!isWhitelistLocked && (
@@ -118,7 +154,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
             type="text"
             value={newTitle}
             onChange={(e) => setNewTitle(e.target.value)}
-            placeholder="Add Chrome tab name or URL (e.g. github.com)..."
+            placeholder="Or type tab name / URL..."
             className="flex-1 rounded-lg border border-stone-700 bg-stone-950 px-2.5 py-1.5 text-[11px] text-stone-100 focus:border-emerald-500 focus:outline-none"
           />
           <button
@@ -184,7 +220,6 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
                 </div>
               </div>
 
-              {/* Expand Sub-Tab inline input */}
               {expandingParentId === tab.id && (
                 <form
                   onSubmit={(e) => handleExpandSubmit(e, tab.id)}
@@ -207,7 +242,6 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
                 </form>
               )}
 
-              {/* Child Sub-Tabs */}
               {children.length > 0 && (
                 <div className="mt-1 ml-3 space-y-1 border-l border-stone-800 pl-2">
                   {children.map((child) => (

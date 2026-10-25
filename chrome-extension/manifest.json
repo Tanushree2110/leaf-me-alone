@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "Leaf Me Alone — Chrome Tab Sync",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Automatically syncs your open Google Chrome tabs and sub-tab expansions with Leaf Me Alone.",
-  "permissions": ["tabs"],
+  "permissions": ["tabs", "scripting"],
+  "host_permissions": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"],
   "background": {
     "service_worker": "background.js"
   },

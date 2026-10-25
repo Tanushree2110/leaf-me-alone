@@ -7,20 +7,22 @@ const JXA_LIST_CHROME_TABS = `
   try {
     var chrome = Application('Google Chrome');
     if (!chrome.running()) return JSON.stringify({ ok: false, tabs: [] });
+    var wins = chrome.windows;
+    var winCount = wins.length;
     var result = [];
-    var wins = chrome.windows();
-    for (var w = 0; w < wins.length; w++) {
+    for (var w = 0; w < winCount; w++) {
       var win = wins[w];
       var activeIdx = win.activeTabIndex();
-      var tabs = win.tabs();
-      for (var t = 0; t < tabs.length; t++) {
-        var tab = tabs[t];
+      var ids = win.tabs.id();
+      var titles = win.tabs.title();
+      var urls = win.tabs.url();
+      for (var t = 0; t < ids.length; t++) {
         result.push({
-          chromeTabId: String(tab.id()),
+          chromeTabId: String(ids[t]),
           windowIndex: w + 1,
           tabIndex: t + 1,
-          title: tab.title() || tab.url() || 'Chrome Tab',
-          url: tab.url() || '',
+          title: titles[t] || urls[t] || 'Chrome Tab',
+          url: urls[t] || '',
           active: (w === 0 && (t + 1) === activeIdx)
         });
       }
@@ -55,7 +57,7 @@ export default defineConfig({
                     chrome.windows[${Number(windowIndex) - 1}].activeTabIndex = ${Number(tabIndex)};
                     chrome.activate();
                   `
-                  execFile('osascript', ['-l', 'JavaScript', '-e', activateScript], () => {
+                  execFile('osascript', ['-l', 'JavaScript', '-e', activateScript], { timeout: 6000 }, () => {
                     res.end(JSON.stringify({ ok: true }))
                   })
                   return
@@ -69,10 +71,16 @@ export default defineConfig({
           execFile(
             'osascript',
             ['-l', 'JavaScript', '-e', JXA_LIST_CHROME_TABS],
-            { timeout: 3000 },
-            (err, stdout) => {
+            { timeout: 10000 },
+            (err, stdout, stderr) => {
               if (err || !stdout) {
-                res.end(JSON.stringify({ ok: false, tabs: [] }))
+                res.end(
+                  JSON.stringify({
+                    ok: false,
+                    error: err ? err.message : stderr || 'no output',
+                    tabs: [],
+                  })
+                )
                 return
               }
               res.end(stdout.trim())
