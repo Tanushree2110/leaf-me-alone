@@ -2,23 +2,23 @@ import { RoommateState, RoomUpgrade } from '../types'
 
 export const DIALOGUE_BY_STATE: Record<RoommateState, string[]> = {
   typing: [
-    "Headphones on. Eyes on screen, only whitelisted tabs open. Look at that vine reach for the sun!",
+    "Headphones on. Eyes on screen, no stray tabs. Look at that vine reach for the sun!",
     "Brewed a fresh pour-over. Camera sees you locked in—not a phone in sight.",
-    "Chlorophyll levels optimal. Approved workspace tabs only. I'm almost proud of you.",
+    "Chlorophyll levels optimal. One window, zero wandering. I'm almost proud of you.",
     "Look at Leaf #4 blooming! Turns out your attention span CAN sustain biological life.",
     "Typing at 90 WPM right alongside you. Our studio apartment has never felt warmer.",
   ],
   glaring_with_clipboard: [
     "Oh, don't mind me. Documenting an UNAUTHORIZED tab switch on your performance review.",
-    "Excuse me, that tab was NOT on your initial whitelist. Leaf #3 just died of betrayal.",
+    "Excuse me, that was NOT part of the plan. Leaf #3 just died of betrayal.",
     "I see you looking down at your phone on camera! Put it down before the vine freezes!",
     "*Clicks pen aggressively* 'Subject drifted away from desk / checked phone mid-sprint.'",
-    "I just reset the 'DAYS SINCE LAST DOOMSCROLL' sign to 0. Stick to your allowed tabs!",
+    "I just reset the 'DAYS SINCE LAST DOOMSCROLL' sign to 0. Stay in your window!",
   ],
   sweeping_leaves: [
     "Oh, don't mind me. I'll just sweep up the corpse of Leaf #3 while you check your phone.",
     "*Sweeps crispy brown leaf* Another botanical casualty of an unapproved tab switch.",
-    "I'm a desktop companion, not a leaf-blower. Stay on your whitelisted tabs!",
+    "I'm a desktop companion, not a leaf-blower. Stay in your window!",
     "Crunch, crunch. That's the sound of our greenhouse dying every time you look at your phone.",
   ],
   shivering: [
@@ -30,7 +30,7 @@ export const DIALOGUE_BY_STATE: Record<RoommateState, string[]> = {
   dramatic_sickbed: [
     "The doctors say when that last leaf falls, this sprint ticket dies with me... *coughs*",
     "Johnsy had pneumonia in Greenwich Village; I have terminal Phone-Glance Syndrome.",
-    "Tell my mother I died waiting for you to stay on your whitelisted tabs for 5 minutes...",
+    "Tell my mother I died waiting for you to stay in one window for 5 minutes...",
     "Only one trembling leaf remains against the storm. Lock in on camera or let the curtain fall!",
   ],
   painting_golden_leaf: [

@@ -1,231 +1,241 @@
-import React, { useCallback, useEffect, useRef } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { CameraOff, RefreshCw } from 'lucide-react'
 import { FaceDetector, FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision'
-import { CameraStatus } from '../types'
 
 interface WebcamGuardProps {
   enabled: boolean
-  status: CameraStatus
-  onStatusChange: (status: CameraStatus) => void
-  onPhoneDetected: () => void
-  onAwayDetected: () => void
-  onBackFocused: () => void
+  onPresenceChange: (present: boolean) => void
 }
 
-export const WebcamGuard: React.FC<WebcamGuardProps> = ({
-  enabled,
-  status,
-  onStatusChange,
-  onAwayDetected,
-  onBackFocused,
-}) => {
+/** Normalized (0..1) box in the raw, un-mirrored camera frame. */
+type Box = { x: number; y: number; w: number; h: number }
+
+const CHECK_INTERVAL_MS = 150
+const ABSENT_AFTER_MS = 1000
+const PERSON_PIXEL_THRESHOLD = 0.5
+const PERSON_MIN_COVERAGE = 0.05
+const FACE_MIN_SCORE = 0.5
+
+export const WebcamGuard: React.FC<WebcamGuardProps> = ({ enabled, onPresenceChange }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null)
-  const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null)
-  const streamRef = useRef<MediaStream | null>(null)
+  const overlayRef = useRef<HTMLCanvasElement | null>(null)
   const segmenterRef = useRef<ImageSegmenter | null>(null)
   const faceDetectorRef = useRef<FaceDetector | null>(null)
-  const modelsReadyRef = useRef<boolean>(false)
-  const lastTimestampMsRef = useRef<number>(0)
+  const lastTimestampRef = useRef(0)
+  const lastSeenAtRef = useRef(Date.now())
+  const presentRef = useRef(true)
+  const onPresenceChangeRef = useRef(onPresenceChange)
+  onPresenceChangeRef.current = onPresenceChange
 
-  const hasTriggeredForCurrentAbsenceRef = useRef<boolean>(false)
-  const missingStartMsRef = useRef<number | null>(null)
+  const [present, setPresent] = useState(true)
+  const [modelsReady, setModelsReady] = useState(false)
+  const [cameraState, setCameraState] = useState<'starting' | 'live' | 'blocked'>('starting')
+  const [restartKey, setRestartKey] = useState(0)
 
-  const callbacksRef = useRef({
-    status,
-    onStatusChange,
-    onAwayDetected,
-    onBackFocused,
-  })
-  useEffect(() => {
-    callbacksRef.current = {
-      status,
-      onStatusChange,
-      onAwayDetected,
-      onBackFocused,
-    }
-  }, [status, onStatusChange, onAwayDetected, onBackFocused])
+  const reportPresence = (next: boolean) => {
+    if (presentRef.current === next) return
+    presentRef.current = next
+    setPresent(next)
+    onPresenceChangeRef.current(next)
+  }
 
-  // Initialize MediaPipe SelfieSegmenter + FaceDetector from local /wasm and /models
   useEffect(() => {
     let cancelled = false
-    async function initMediaPipe() {
+    ;(async () => {
       try {
         const vision = await FilesetResolver.forVisionTasks('/wasm')
-        if (cancelled) return
-
         const [segmenter, faceDetector] = await Promise.all([
           ImageSegmenter.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath: '/models/selfie_segmenter.tflite',
-            },
+            baseOptions: { modelAssetPath: '/models/selfie_segmenter.tflite' },
             runningMode: 'VIDEO',
-            outputCategoryMask: true,
+            outputCategoryMask: false,
             outputConfidenceMasks: true,
           }).catch(() => null),
           FaceDetector.createFromOptions(vision, {
-            baseOptions: {
-              modelAssetPath: '/models/blaze_face_short_range.tflite',
-            },
+            baseOptions: { modelAssetPath: '/models/blaze_face_short_range.tflite' },
             runningMode: 'VIDEO',
-            minDetectionConfidence: 0.25,
+            minDetectionConfidence: 0.4,
           }).catch(() => null),
         ])
-
-        if (!cancelled) {
-          segmenterRef.current = segmenter
-          faceDetectorRef.current = faceDetector
-          modelsReadyRef.current = Boolean(segmenter || faceDetector)
+        if (cancelled) {
+          segmenter?.close()
+          faceDetector?.close()
+          return
         }
-      } catch {
-        modelsReadyRef.current = false
-      }
-    }
-    initMediaPipe()
+        segmenterRef.current = segmenter
+        faceDetectorRef.current = faceDetector
+        setModelsReady(Boolean(segmenter || faceDetector))
+      } catch {}
+    })()
     return () => {
       cancelled = true
       try {
         segmenterRef.current?.close()
         faceDetectorRef.current?.close()
       } catch {}
+      segmenterRef.current = null
+      faceDetectorRef.current = null
     }
   }, [])
 
-  // Physically shut down webcam hardware tracks immediately when stopped or Pomodoro is off!
-  const stopCamera = useCallback(() => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((t) => {
+  // Camera hardware is only on while enabled (Pomodoro focus running).
+  useEffect(() => {
+    if (!enabled) return
+    let cancelled = false
+    let stream: MediaStream | null = null
+    lastSeenAtRef.current = Date.now()
+    presentRef.current = true
+    setPresent(true)
+    setCameraState('starting')
+
+    navigator.mediaDevices
+      .getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' },
+        audio: false,
+      })
+      .then((s) => {
+        if (cancelled) {
+          s.getTracks().forEach((t) => t.stop())
+          return
+        }
+        stream = s
+        s.getVideoTracks().forEach((t) => {
+          t.onended = () => {
+            if (!cancelled) setCameraState('blocked')
+          }
+        })
+        const video = videoRef.current
+        if (video) {
+          video.srcObject = s
+          video.play().catch(() => {})
+        }
+        setCameraState('live')
+      })
+      .catch(() => {
+        if (!cancelled) setCameraState('blocked')
+      })
+
+    return () => {
+      cancelled = true
+      stream?.getTracks().forEach((t) => {
         try {
           t.stop()
         } catch {}
       })
-      streamRef.current = null
+      const video = videoRef.current
+      if (video) {
+        try {
+          video.pause()
+          video.srcObject = null
+        } catch {}
+      }
     }
-    if (videoRef.current) {
-      try {
-        videoRef.current.pause()
-        videoRef.current.srcObject = null
-      } catch {}
-    }
-    hasTriggeredForCurrentAbsenceRef.current = false
-    missingStartMsRef.current = null
-    callbacksRef.current.onStatusChange('off')
-  }, [])
+  }, [enabled, restartKey])
 
-  const startCamera = useCallback(async () => {
-    callbacksRef.current.onStatusChange('initializing')
-    try {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop())
-      }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: 320, height: 240, facingMode: 'user' },
-        audio: false,
-      })
-      // If Pomodoro was stopped while getUserMedia was resolving, immediately stop tracks!
-      if (!enabled) {
-        stream.getTracks().forEach((t) => t.stop())
-        return
-      }
-      streamRef.current = stream
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        await videoRef.current.play().catch(() => {})
-      }
-      hasTriggeredForCurrentAbsenceRef.current = false
-      missingStartMsRef.current = null
-      callbacksRef.current.onStatusChange('focused')
-      callbacksRef.current.onBackFocused()
-    } catch {
-      callbacksRef.current.onStatusChange('permission_denied')
-    }
-  }, [enabled])
-
-  useEffect(() => {
-    if (enabled) {
-      startCamera()
-    } else {
-      stopCamera()
-    }
-    return () => {
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop())
-        streamRef.current = null
-      }
-    }
-  }, [enabled, startCamera, stopCamera])
-
-  // Real-time Person & Face Presence Loop (ONLY runs when enabled === true!)
   useEffect(() => {
     if (!enabled) return
+    let busy = false
 
-    let isDetecting = false
+    const drawOverlay = (box: Box | null, isFace: boolean, vw: number, vh: number) => {
+      const canvas = overlayRef.current
+      if (!canvas) return
+      const cw = canvas.clientWidth
+      const ch = canvas.clientHeight
+      if (!cw || !ch) return
+      const dpr = window.devicePixelRatio || 1
+      if (canvas.width !== Math.round(cw * dpr) || canvas.height !== Math.round(ch * dpr)) {
+        canvas.width = Math.round(cw * dpr)
+        canvas.height = Math.round(ch * dpr)
+      }
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, cw, ch)
+
+      if (!presentRef.current) {
+        ctx.fillStyle = 'rgba(244, 63, 94, 0.45)'
+        ctx.fillRect(0, 0, cw, ch)
+        return
+      }
+      if (!box) return
+
+      // The <video> is object-cover + mirrored, so map the raw-frame box the same way.
+      const scale = Math.max(cw / vw, ch / vh)
+      const dw = vw * scale
+      const dh = vh * scale
+      const ox = (cw - dw) / 2
+      const oy = (ch - dh) / 2
+      const x = ox + (1 - box.x - box.w) * dw
+      const y = oy + box.y * dh
+      ctx.strokeStyle = '#10b981'
+      ctx.lineWidth = 2
+      ctx.setLineDash(isFace ? [] : [4, 3])
+      ctx.strokeRect(x, y, box.w * dw, box.h * dh)
+    }
 
     const interval = setInterval(() => {
-      if (
-        typeof document !== 'undefined' &&
-        (document.hidden || /Electron|Cursor/i.test(navigator.userAgent))
-      ) {
-        missingStartMsRef.current = null
-        return
-      }
-
-      if (isDetecting) return
+      if (busy) return
       const video = videoRef.current
-      const overlay = overlayCanvasRef.current
-      if (!video) return
+      const segmenter = segmenterRef.current
+      const faceDetector = faceDetectorRef.current
+      const canCheck =
+        !document.hidden &&
+        video !== null &&
+        video.readyState >= 2 &&
+        video.videoWidth > 0 &&
+        (segmenter !== null || faceDetector !== null)
 
-      const activeStream = streamRef.current
-      if (
-        !activeStream ||
-        activeStream.getVideoTracks().length === 0 ||
-        activeStream.getVideoTracks()[0].readyState === 'ended'
-      ) {
-        startCamera()
+      // Never judge presence without a live frame and a loaded model.
+      if (!canCheck) {
+        lastSeenAtRef.current = Date.now()
         return
       }
-      if (video.paused && video.readyState >= 2) {
-        video.play().catch(() => {})
-      }
-      if (video.readyState < 2 || video.videoWidth === 0) return
 
-      if (!modelsReadyRef.current) return
-
-      isDetecting = true
+      busy = true
       try {
-        let personVisible = false
-        let boxX = 0.2
-        let boxY = 0.12
-        let boxW = 0.6
-        let boxH = 0.78
+        const vw = video.videoWidth
+        const vh = video.videoHeight
+        const ts = Math.max(lastTimestampRef.current + 1, Math.floor(performance.now()))
+        lastTimestampRef.current = ts
+        let faceBox: Box | null = null
+        let bodyBox: Box | null = null
 
-        const nowPerf = Math.max(
-          lastTimestampMsRef.current + 2,
-          Math.floor(performance.now())
-        )
-        lastTimestampMsRef.current = nowPerf
-
-        // 1. Check MediaPipe SelfieSegmenter
-        if (segmenterRef.current) {
+        if (faceDetector) {
           try {
-            const segResult = segmenterRef.current.segmentForVideo(video, nowPerf)
-            const confMasks = segResult?.confidenceMasks
-            if (confMasks && confMasks.length > 0) {
-              const mask = confMasks[0]
-              const floatArr = mask.getAsFloat32Array()
-              const mW = mask.width
-              const mH = mask.height
-              const total = floatArr.length
+            const result = faceDetector.detectForVideo(video, ts)
+            for (const det of result.detections ?? []) {
+              const bb = det.boundingBox
+              const score = det.categories?.[0]?.score ?? 1
+              if (!bb || score < FACE_MIN_SCORE || bb.width < 12) continue
+              faceBox = { x: bb.originX / vw, y: bb.originY / vh, w: bb.width / vw, h: bb.height / vh }
+              break
+            }
+          } catch {}
+        }
 
-              let personPixels = 0
-              let minX = mW,
-                maxX = 0,
-                minY = mH,
-                maxY = 0
-              for (let y = 0; y < mH; y += 2) {
-                const rowOff = y * mW
-                for (let x = 0; x < mW; x += 2) {
-                  if (floatArr[rowOff + x] > 0.45) {
-                    personPixels += 4
+        if (segmenter) {
+          try {
+            const result = segmenter.segmentForVideo(video, ts)
+            const masks = result.confidenceMasks
+            if (masks && masks.length > 0) {
+              // Single-channel selfie model -> [background, person]; person is always last.
+              const mask = masks[masks.length - 1]
+              const data = mask.getAsFloat32Array()
+              const mw = mask.width
+              const mh = mask.height
+              const step = Math.max(1, Math.round(Math.min(mw, mh) / 64))
+              let samples = 0
+              let hits = 0
+              let minX = mw
+              let maxX = -1
+              let minY = mh
+              let maxY = -1
+              for (let y = 0; y < mh; y += step) {
+                const row = y * mw
+                for (let x = 0; x < mw; x += step) {
+                  samples++
+                  if (data[row + x] > PERSON_PIXEL_THRESHOLD) {
+                    hits++
                     if (x < minX) minX = x
                     if (x > maxX) maxX = x
                     if (y < minY) minY = y
@@ -233,164 +243,89 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
                   }
                 }
               }
-
-              const personAreaRatio = personPixels / Math.max(1, total)
-              if (personAreaRatio >= 0.06) {
-                personVisible = true
-                boxX = minX / mW
-                boxY = minY / mH
-                boxW = Math.max(0.2, (maxX - minX) / mW)
-                boxH = Math.max(0.25, (maxY - minY) / mH)
+              if (samples > 0 && hits / samples >= PERSON_MIN_COVERAGE) {
+                bodyBox = {
+                  x: minX / mw,
+                  y: minY / mh,
+                  w: Math.min(1, (maxX - minX + step) / mw),
+                  h: Math.min(1, (maxY - minY + step) / mh),
+                }
               }
             }
-            segResult?.close()
-          } catch {}
-        }
-
-        // 2. Also check MediaPipe FaceDetector
-        if (faceDetectorRef.current) {
-          try {
-            const faceRes = faceDetectorRef.current.detectForVideo(video, nowPerf + 1)
-            if (faceRes && faceRes.detections && faceRes.detections.length > 0) {
-              const bb = faceRes.detections[0].boundingBox
-              const vw = video.videoWidth || 320
-              const vh = video.videoHeight || 240
-              if (bb && bb.width >= 16 && bb.height >= 16) {
-                personVisible = true
-                boxX = bb.originX / vw
-                boxY = bb.originY / vh
-                boxW = bb.width / vw
-                boxH = bb.height / vh
-              }
-            }
+            result.close()
           } catch {}
         }
 
         const now = Date.now()
-        const {
-          status: curStatus,
-          onStatusChange: cbStatus,
-          onAwayDetected: cbAway,
-          onBackFocused: cbFocused,
-        } = callbacksRef.current
-
-        if (!personVisible) {
-          if (!missingStartMsRef.current) missingStartMsRef.current = now
-          const elapsed = (now - missingStartMsRef.current) / 1000
-
-          if (elapsed >= 0.6) {
-            if (curStatus !== 'away_detected') {
-              cbStatus('away_detected')
-            }
-            if (!hasTriggeredForCurrentAbsenceRef.current) {
-              hasTriggeredForCurrentAbsenceRef.current = true
-              cbAway()
-            }
-          }
-        } else {
-          missingStartMsRef.current = null
-          hasTriggeredForCurrentAbsenceRef.current = false
-          if (curStatus !== 'focused') {
-            cbStatus('focused')
-          }
-          cbFocused()
+        if (faceBox || bodyBox) {
+          lastSeenAtRef.current = now
+          reportPresence(true)
+        } else if (now - lastSeenAtRef.current >= ABSENT_AFTER_MS) {
+          reportPresence(false)
         }
-
-        if (overlay) {
-          const octx = overlay.getContext('2d')
-          if (octx) {
-            const W = overlay.width
-            const H = overlay.height
-            octx.clearRect(0, 0, W, H)
-
-            const showRed =
-              !personVisible &&
-              missingStartMsRef.current !== null &&
-              now - missingStartMsRef.current >= 600
-
-            if (!showRed) {
-              const mirroredX = (1 - (boxX + boxW)) * W
-              const ry = boxY * H
-              const rw = boxW * W
-              const rh = boxH * H
-
-              octx.strokeStyle = '#10b981'
-              octx.lineWidth = 2.5
-              octx.strokeRect(mirroredX, ry, rw, rh)
-            } else {
-              octx.fillStyle = 'rgba(244, 63, 94, 0.48)'
-              octx.fillRect(0, 0, W, H)
-              octx.strokeStyle = '#f43f5e'
-              octx.lineWidth = 4
-              octx.strokeRect(2, 2, W - 4, H - 4)
-            }
-          }
-        }
+        drawOverlay(faceBox ?? bodyBox, faceBox !== null, vw, vh)
       } finally {
-        isDetecting = false
+        busy = false
       }
-    }, 150)
+    }, CHECK_INTERVAL_MS)
 
     return () => clearInterval(interval)
-  }, [enabled, startCamera])
+  }, [enabled, restartKey])
 
-  // When Pomodoro is stopped or OFF, camera is completely OFF!
   if (!enabled) {
     return (
       <div className="flex items-center gap-2 rounded-xl border border-stone-800 bg-stone-900/90 px-3 py-2 font-mono text-[11px] text-stone-400 shadow-lg backdrop-blur-md">
         <CameraOff className="h-3.5 w-3.5 text-stone-500" />
-        <span>Camera Off (Starts with Pomodoro)</span>
+        <span>Camera off · starts with Pomodoro</span>
       </div>
     )
   }
 
-  const isRedState = status === 'away_detected' || status === 'phone_detected'
+  const isAway = !present
+  const caption =
+    cameraState === 'blocked'
+      ? 'Camera blocked'
+      : cameraState === 'starting' || !modelsReady
+      ? 'Starting…'
+      : isAway
+      ? 'Not in camera'
+      : "You're here"
 
   return (
     <div
-      className={`flex items-center gap-1.5 rounded-2xl border-2 p-1.5 shadow-2xl backdrop-blur-md transition-all ${
-        isRedState
-          ? 'border-rose-500 bg-rose-950/95 ring-4 ring-rose-500/50'
-          : 'border-emerald-500/80 bg-stone-900/95'
+      data-camera-presence={isAway ? 'away' : 'present'}
+      className={`rounded-2xl border-2 p-1.5 shadow-2xl backdrop-blur-md transition-colors ${
+        isAway ? 'border-rose-500 bg-rose-950/95 ring-4 ring-rose-500/50' : 'border-emerald-500/80 bg-stone-900/95'
       }`}
     >
       <div
-        className={`relative h-20 w-28 overflow-hidden rounded-xl border-2 bg-stone-950 shrink-0 transition-colors ${
-          isRedState ? 'border-rose-500' : 'border-emerald-500'
+        className={`relative h-24 w-32 overflow-hidden rounded-xl border-2 bg-stone-950 ${
+          isAway ? 'border-rose-500' : 'border-emerald-500'
         }`}
       >
-        <span
-          className={`absolute top-1.5 left-1.5 z-10 h-3 w-3 rounded-full shadow ${
-            isRedState ? 'bg-rose-500 animate-ping' : 'bg-emerald-400'
-          }`}
-        />
-        <span
-          className={`absolute top-1.5 left-1.5 z-10 h-3 w-3 rounded-full ${
-            isRedState ? 'bg-rose-500' : 'bg-emerald-400'
-          }`}
-        />
-
-        <button
-          onClick={startCamera}
-          className="absolute top-1 right-1 z-10 rounded bg-black/50 p-1 text-stone-300 hover:bg-black/80 hover:text-white"
-          title="Restart Camera"
-        >
-          <RefreshCw className="h-2.5 w-2.5" />
-        </button>
-
         <video
           ref={videoRef}
           autoPlay
           muted
           playsInline
-          className="block h-full w-full object-cover -scale-x-100"
+          className="block h-full w-full -scale-x-100 object-cover"
         />
-        <canvas
-          ref={overlayCanvasRef}
-          width={128}
-          height={96}
-          className="pointer-events-none absolute inset-0 block h-full w-full"
-        />
+        <canvas ref={overlayRef} className="pointer-events-none absolute inset-0 block h-full w-full" />
+        <button
+          onClick={() => setRestartKey((k) => k + 1)}
+          className="absolute right-1 top-1 z-10 rounded bg-black/50 p-1 text-stone-300 hover:bg-black/80 hover:text-white"
+          title="Restart camera"
+        >
+          <RefreshCw className="h-2.5 w-2.5" />
+        </button>
+        <span
+          className={`absolute bottom-1 left-1 z-10 flex items-center gap-1 rounded bg-black/60 px-1.5 py-0.5 font-mono text-[9px] font-bold ${
+            isAway ? 'text-rose-300' : 'text-emerald-300'
+          }`}
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${isAway ? 'bg-rose-500 animate-ping' : 'bg-emerald-400'}`} />
+          {caption}
+        </span>
       </div>
     </div>
   )

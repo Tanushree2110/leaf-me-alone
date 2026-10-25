@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Leaf Me Alone — Focus Tab Guard",
-  "version": "1.6.0",
-  "description": "Enforces tab rules ONLY when localhost:5173 is open and Pomodoro Focus is started. Allows everything when Stopped or Closed.",
-  "permissions": ["tabs", "scripting"],
+  "name": "Leaf Me Alone — Focus Guard",
+  "version": "1.7.0",
+  "description": "Only while a Leaf Me Alone focus session runs: blocks new tabs/windows and pulls you back to the game window. Allows everything otherwise.",
+  "permissions": ["tabs", "scripting", "storage"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

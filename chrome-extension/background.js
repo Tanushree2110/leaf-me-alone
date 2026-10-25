@@ -1,185 +1,218 @@
-// Leaf Me Alone — Safe Focus Tab Guard (v1.6.0)
-// STRICTLY GATED BY POMODORO START/STOP:
-// 1. If localhost:5173 is NOT open in Chrome -> DO NOTHING (allow all tabs, windows, and apps).
-// 2. If Pomodoro is STOPPED, OFF, or on BREAK (/api/focus-guard-state active === false) -> DO NOTHING!
-// 3. ONLY when localhost:5173 IS open AND Pomodoro Focus is STARTED (active === true):
-//    - Blocks standalone New Tabs (+ / Cmd+T) and New Windows (Cmd+N)
-//    - Logs a violation if you drift away from Chrome to another app
-//    - Allows switching/closing existing tabs and opening links clicked inside existing tabs.
+// Leaf Me Alone — Focus Guard (v1.7.0)
+// Acts ONLY while the game tab (localhost:5173) is open AND a Pomodoro focus session is running.
+// Stopped, on break, or game closed -> every tab, window and app is allowed.
+//
+// While focus is running:
+//  - New tabs (+ / Cmd+T) and new windows (Cmd+N) are closed and reported.
+//  - Tabs opened by clicking a link inside an existing tab are allowed.
+//  - Leaving the game window (another app or another Chrome window) is reported and Chrome
+//    pulls the game window back to the front until you return.
 
-let recentLinkClicks = [] // { tabId, url, timestamp }
-let allowedTabIds = new Set()
-let allowedWindowIds = new Set()
-let wasGuardActive = false
+const SERVER = 'http://localhost:5173'
+const GUARD_CACHE_MS = 1000
+const DRIFT_CONFIRM_MS = 350
+const DRIFT_RECHECK_MS = 1500
+const LINK_CLICK_WINDOW_MS = 8000
 
-async function getGameAndGuardState() {
-  try {
-    const allTabs = await chrome.tabs.query({})
-    const gameTab = allTabs.find((t) => {
-      const u = t.url || t.pendingUrl || ''
-      return u.includes('localhost:5173') || u.includes('127.0.0.1:5173')
-    })
+let guardCache = { at: 0, active: false }
+let recentLinkClicks = [] // { tabId, at }
+let drifting = false
+let driftTimer = null
 
-    // 1. If localhost:5173 is NOT open in Chrome, NEVER block anything!
-    if (!gameTab) {
-      wasGuardActive = false
-      return { active: false, gameTab: null, allTabs }
-    }
-
-    // 2. Check live Pomodoro state on localhost:5173 (with cache: 'no-store' so it is never stale!)
-    const res = await fetch('http://localhost:5173/api/focus-guard-state', {
-      cache: 'no-store',
-    })
-    const data = await res.json()
-    const isRunning = Boolean(data && data.active)
-
-    if (isRunning && !wasGuardActive) {
-      // Pomodoro just started -> Snapshot all currently open tabs & windows as allowed!
-      allowedTabIds = new Set(allTabs.map((t) => t.id).filter(Boolean))
-      allowedWindowIds = new Set(allTabs.map((t) => t.windowId).filter(Boolean))
-    }
-    wasGuardActive = isRunning
-
-    return { active: isRunning, gameTab, allTabs }
-  } catch {
-    wasGuardActive = false
-    return { active: false, gameTab: null, allTabs: [] }
-  }
+function isGameUrl(u) {
+  return (
+    typeof u === 'string' &&
+    (u.startsWith('http://localhost:5173') || u.startsWith('http://127.0.0.1:5173'))
+  )
 }
 
-async function notifyViolationToGame(gameTab, reason, refocusGameTab) {
+function isBlankNewTabUrl(u) {
+  return (
+    !u ||
+    u.startsWith('chrome://newtab') ||
+    u.startsWith('chrome://new-tab-page') ||
+    u.startsWith('chrome-search://') ||
+    u.startsWith('edge://newtab')
+  )
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function maybeSelfUpdate(diskVersion) {
+  if (!diskVersion || diskVersion === chrome.runtime.getManifest().version) return
   try {
-    await fetch('http://localhost:5173/api/new-tab-blocked', {
+    const { leafReloadAttemptFor } = await chrome.storage.local.get('leafReloadAttemptFor')
+    if (leafReloadAttemptFor === diskVersion) return
+    await chrome.storage.local.set({ leafReloadAttemptFor: diskVersion })
+    chrome.runtime.reload()
+  } catch {}
+}
+
+async function fetchGuard(force) {
+  const now = Date.now()
+  if (!force && now - guardCache.at < GUARD_CACHE_MS) return guardCache
+  try {
+    const res = await fetch(SERVER + '/api/focus-guard-state', { cache: 'no-store' })
+    const data = await res.json()
+    guardCache = { at: now, active: Boolean(data && data.active) }
+    maybeSelfUpdate(data && data.extensionVersion)
+  } catch {
+    guardCache = { at: now, active: false }
+  }
+  return guardCache
+}
+
+async function getState(forceGuard) {
+  let tabs = []
+  try {
+    tabs = await chrome.tabs.query({})
+  } catch {}
+  const gameTabs = tabs.filter((t) => isGameUrl(t.url || t.pendingUrl))
+  const gameTab = gameTabs.find((t) => t.active) || gameTabs[0] || null
+  if (!gameTab) return { active: false, gameTab: null, tabs }
+  const guard = await fetchGuard(forceGuard)
+  return { active: guard.active, gameTab, tabs }
+}
+
+async function notify(path, body) {
+  try {
+    await fetch(SERVER + path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify(body),
       cache: 'no-store',
     })
   } catch {}
-
-  if (gameTab && gameTab.id) {
-    try {
-      if (refocusGameTab) {
-        await chrome.tabs.update(gameTab.id, { active: true })
-      }
-      await chrome.tabs.sendMessage(gameTab.id, {
-        type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
-        reason,
-      })
-    } catch {}
-  }
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type === 'LEAF_LINK_CLICKED_ON_TAB') {
-    const senderTabId = sender?.tab?.id
-    if (senderTabId) {
-      allowedTabIds.add(senderTabId)
-      const now = Date.now()
-      recentLinkClicks = recentLinkClicks.filter((c) => now - c.timestamp < 8000)
-      recentLinkClicks.push({
-        tabId: senderTabId,
-        url: msg.url,
-        timestamp: now,
-      })
-    }
-    sendResponse({ ok: true })
-    return true
-  }
-
-  if (msg?.type === 'LEAF_REQUEST_CHROME_TABS') {
-    chrome.tabs.query({}).then((allTabs) => {
-      allTabs.forEach((t) => {
-        if (t.id) allowedTabIds.add(t.id)
-        if (t.windowId) allowedWindowIds.add(t.windowId)
-      })
-      sendResponse({ ok: true, allowedCount: allowedTabIds.size })
-    })
-    return true
-  }
-})
-
-// Detect drifting away from Chrome to another desktop app ONLY when Pomodoro is started!
-let lastChromeBlurAlertMs = 0
-if (chrome.windows && chrome.windows.onFocusChanged) {
-  chrome.windows.onFocusChanged.addListener(async (windowId) => {
-    if (windowId === chrome.windows.WINDOW_ID_NONE) {
-      const { active, gameTab } = await getGameAndGuardState()
-      // When Pomodoro is Stopped or game is closed -> Do nothing! Allow switching apps freely!
-      if (!active || !gameTab) return
-
-      const now = Date.now()
-      if (now - lastChromeBlurAlertMs < 2000) return
-      lastChromeBlurAlertMs = now
-      await notifyViolationToGame(
-        gameTab,
-        'Moved off from Google Chrome to another app!',
-        false
-      )
-    }
-  })
+async function pullBackToGameWindow(gameTab) {
+  try {
+    await chrome.windows.update(gameTab.windowId, { focused: true })
+  } catch {}
 }
 
-chrome.tabs.onCreated.addListener(async (tab) => {
-  const { active, gameTab, allTabs } = await getGameAndGuardState()
+async function closeTab(tabId) {
+  try {
+    await chrome.tabs.remove(tabId)
+  } catch {}
+}
 
-  // When Pomodoro is Stopped or game is closed -> Allow opening any tab or window freely!
+// ---------- Drift: leaving the game window ----------
+function scheduleDriftCheck(ms) {
+  if (driftTimer) clearTimeout(driftTimer)
+  driftTimer = setTimeout(checkDrift, ms)
+}
+
+async function checkDrift() {
+  driftTimer = null
+  const { active, gameTab } = await getState(false)
   if (!active || !gameTab) {
-    if (tab.id) allowedTabIds.add(tab.id)
-    if (tab.windowId) allowedWindowIds.add(tab.windowId)
+    if (drifting) {
+      drifting = false
+      await notify('/api/drift-state', { drifting: false, source: 'extension' })
+    }
     return
   }
 
-  // Never close if there is only 1 tab open in Chrome
-  if (allTabs.length <= 1) {
-    if (tab.id) allowedTabIds.add(tab.id)
+  let focusedWindowId = chrome.windows.WINDOW_ID_NONE
+  try {
+    const win = await chrome.windows.getLastFocused({})
+    if (win && win.focused) focusedWindowId = win.id
+  } catch {}
+
+  if (focusedWindowId !== gameTab.windowId) {
+    const reason =
+      focusedWindowId === chrome.windows.WINDOW_ID_NONE
+        ? 'You left Chrome for another app'
+        : 'You switched to another Chrome window'
+    drifting = true
+    await pullBackToGameWindow(gameTab)
+    await notify('/api/drift-state', { drifting: true, reason, source: 'extension' })
+    scheduleDriftCheck(DRIFT_RECHECK_MS)
+  } else if (drifting) {
+    drifting = false
+    await notify('/api/drift-state', { drifting: false, source: 'extension' })
+  }
+}
+
+chrome.windows.onFocusChanged.addListener(() => scheduleDriftCheck(DRIFT_CONFIRM_MS))
+
+// ---------- New tabs / windows ----------
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === 'LEAF_LINK_CLICKED_ON_TAB' && sender && sender.tab && sender.tab.id) {
+    const now = Date.now()
+    recentLinkClicks = recentLinkClicks.filter((c) => now - c.at < LINK_CLICK_WINDOW_MS)
+    recentLinkClicks.push({ tabId: sender.tab.id, at: now })
+  }
+  sendResponse({ ok: true })
+})
+
+chrome.tabs.onCreated.addListener(async (tab) => {
+  const { active, gameTab, tabs } = await getState(true)
+  if (!active || !gameTab || !tab.id || tab.id === gameTab.id) return
+  // Never close the last remaining tab in Chrome.
+  if (tabs.length <= 1) return
+
+  if (tab.windowId !== gameTab.windowId) {
+    await closeTab(tab.id)
+    await pullBackToGameWindow(gameTab)
+    await notify('/api/new-tab-blocked', { reason: 'Opened a new window' })
     return
   }
 
   const now = Date.now()
-  const targetUrl = tab.pendingUrl || tab.url || ''
+  recentLinkClicks = recentLinkClicks.filter((c) => now - c.at < LINK_CLICK_WINDOW_MS)
+  const fromLink = tab.openerTabId !== undefined || recentLinkClicks.length > 0
 
-  // Did the user open a brand-new second Chrome window while Pomodoro is running?
-  if (tab.windowId && gameTab.windowId && tab.windowId !== gameTab.windowId) {
-    if (tab.id) {
-      try {
-        await chrome.tabs.remove(tab.id)
-      } catch {}
+  let url = tab.pendingUrl || tab.url || ''
+  if (!url && fromLink) {
+    // Link-opened tabs can be created before their URL is known.
+    await delay(300)
+    try {
+      const fresh = await chrome.tabs.get(tab.id)
+      url = fresh.pendingUrl || fresh.url || ''
+    } catch {
+      return
     }
-    await notifyViolationToGame(
-      gameTab,
-      'Blocked opening a New Browser Window (Cmd+N)!',
-      true
-    )
-    return
+    if (!url || url === 'about:blank') return
   }
 
-  const isManualBlankNewTab =
-    !targetUrl ||
-    targetUrl.startsWith('chrome://newtab') ||
-    targetUrl.startsWith('edge://newtab') ||
-    targetUrl === 'about:blank'
+  if (fromLink && !isBlankNewTabUrl(url)) return
+  if (fromLink && url === 'about:blank') return
 
-  const matchedLinkClick = recentLinkClicks.some((c) => now - c.timestamp < 8000)
-
-  if (!isManualBlankNewTab && matchedLinkClick) {
-    // ALLOWED: Opened by clicking a link on an existing tab!
-    if (tab.id) allowedTabIds.add(tab.id)
-  } else {
-    // BLOCKED: Standalone New Tab (+ / Cmd+T) while Pomodoro is running!
-    if (tab.id && tab.id !== gameTab.id) {
-      try {
-        await chrome.tabs.remove(tab.id)
-      } catch {}
-    }
-    await notifyViolationToGame(
-      gameTab,
-      'Blocked opening a standalone New Tab (only links from existing tabs allowed)!',
-      true
-    )
-  }
+  await closeTab(tab.id)
+  try {
+    await chrome.tabs.update(gameTab.id, { active: true })
+  } catch {}
+  await notify('/api/new-tab-blocked', { reason: 'Opened a new tab' })
 })
 
-chrome.tabs.onRemoved.addListener((tabId) => {
-  allowedTabIds.delete(tabId)
+// ---------- Keep scripts alive in tabs that were open before install/reload ----------
+async function injectIntoExistingTabs() {
+  let tabs = []
+  try {
+    tabs = await chrome.tabs.query({})
+  } catch {}
+  for (const t of tabs) {
+    const u = t.url || ''
+    if (!t.id || !/^https?:/.test(u)) continue
+    try {
+      await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['link-tracker.js'] })
+    } catch {}
+    if (isGameUrl(u)) {
+      try {
+        await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ['content.js'] })
+      } catch {}
+    }
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => {
+  injectIntoExistingTabs()
+})
+
+chrome.runtime.onStartup.addListener(() => {
+  fetchGuard(true)
 })

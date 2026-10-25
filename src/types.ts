@@ -8,15 +8,6 @@ export type RoommateState =
 
 export type FocusMode = 'locked_in' | 'distracted' | 'last_leaf_climax' | 'golden_comeback'
 
-export type CameraStatus =
-  | 'off'
-  | 'initializing'
-  | 'focused'
-  | 'keyboard_glance'
-  | 'phone_detected'
-  | 'away_detected'
-  | 'permission_denied'
-
 export type RoomSkinId =
   | 'cozy_greenhouse'
   | 'tokyo_lofi'
@@ -40,17 +31,6 @@ export interface RoomSkin {
   rugColor: string
   windowFrameColor: string
   sweaterColor: string
-}
-
-export interface AllowedTab {
-  id: string
-  title: string
-  url: string
-  parentId?: string
-  chromeTabId?: string | number
-  windowIndex?: number
-  tabIndex?: number
-  isActive?: boolean
 }
 
 export interface LeafNode {
@@ -93,14 +73,6 @@ export interface RoomUpgrade {
   unlockMinutes: number
   unlocked: boolean
   icon: string
-}
-
-export interface ActivityLogItem {
-  id: string
-  timestamp: string
-  type: 'focus' | 'distraction' | 'climax' | 'upgrade' | 'redemption' | 'camera' | 'tab_whitelist'
-  message: string
-  quote?: string
 }
 
 export interface SessionStats {
