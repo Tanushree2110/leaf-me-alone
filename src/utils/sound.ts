@@ -137,9 +137,15 @@ class SoundEngine {
     } else if (mood === 'storm') {
       this.startRoughStormLoop()
       this.playThunderCrack()
+      this.playLizardLick()
       this.thunderTimer = setInterval(() => {
         if (this.enabled && this.currentMood === 'storm') {
           this.playThunderCrack()
+          setTimeout(() => {
+            if (this.enabled && this.currentMood === 'storm') {
+              this.playLizardLick()
+            }
+          }, 900)
         }
       }, 4200)
     }
@@ -298,6 +304,7 @@ class SoundEngine {
     const now = ctx.currentTime
 
     this.playThunderCrack()
+    this.playLizardLick()
 
     ;[0, 0.09].forEach((offset) => {
       const osc = ctx.createOscillator()
@@ -374,6 +381,41 @@ class SoundEngine {
     overtone.start(now)
     osc.stop(now + 1.45)
     overtone.stop(now + 1.45)
+  }
+
+  public playLizardLick() {
+    if (!this.enabled) return
+    const audio = this.getContext()
+    if (!audio) return
+    const { ctx, out } = audio
+    const now = ctx.currentTime
+
+    // Cartoonish wet "SLURP-BLEP!" frequency sweep
+    const osc = ctx.createOscillator()
+    const filter = ctx.createBiquadFilter()
+    const gain = ctx.createGain()
+
+    osc.type = 'sawtooth'
+    osc.frequency.setValueAtTime(190, now)
+    osc.frequency.exponentialRampToValueAtTime(680, now + 0.16)
+    osc.frequency.exponentialRampToValueAtTime(980, now + 0.24)
+    osc.frequency.exponentialRampToValueAtTime(420, now + 0.29)
+
+    filter.type = 'bandpass'
+    filter.frequency.setValueAtTime(400, now)
+    filter.frequency.exponentialRampToValueAtTime(1600, now + 0.22)
+    filter.Q.setValueAtTime(3.5, now)
+
+    gain.gain.setValueAtTime(0.001, now)
+    gain.gain.linearRampToValueAtTime(0.16, now + 0.05)
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.31)
+
+    osc.connect(filter)
+    filter.connect(gain)
+    gain.connect(out)
+
+    osc.start(now)
+    osc.stop(now + 0.32)
   }
 
   public playSoftClick() {
