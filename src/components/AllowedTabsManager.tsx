@@ -5,6 +5,7 @@ import {
   GitBranch,
   Lock,
   Plus,
+  Puzzle,
   ShieldAlert,
   ShieldCheck,
   Trash2,
@@ -16,19 +17,21 @@ interface AllowedTabsManagerProps {
   allowedTabs: AllowedTab[]
   isWhitelistLocked: boolean
   activeAllowedTabId: string | null
+  extensionConnected: boolean
   onLockWhitelist: () => void
   onUnlockWhitelistReset: () => void
   onAddInitialTab: (title: string, url: string) => void
   onRemoveInitialTab: (id: string) => void
   onExpandSubTab: (parentId: string, title: string, url: string) => void
-  onSwitchToAllowedTab: (tab: AllowedTab) => void
-  onTriggerUnauthorizedTab: () => void
+  onSwitchToAllowedTab: (tab: AllowedTab, openNewWindow?: boolean) => void
+  onTriggerUnauthorizedTab: (attemptedTitle?: string) => void
 }
 
 export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
   allowedTabs,
   isWhitelistLocked,
   activeAllowedTabId,
+  extensionConnected,
   onLockWhitelist,
   onUnlockWhitelistReset,
   onAddInitialTab,
@@ -42,6 +45,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
   const [expandingParentId, setExpandingParentId] = useState<string | null>(null)
   const [expandTitle, setExpandTitle] = useState('')
   const [expandUrl, setExpandUrl] = useState('')
+  const [unapprovedInput, setUnapprovedInput] = useState('')
 
   const rootTabs = allowedTabs.filter((t) => !t.parentId)
   const getChildren = (parentId: string) =>
@@ -64,13 +68,20 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
     setExpandingParentId(null)
   }
 
+  const handleTryOpenUnapproved = (e: React.FormEvent) => {
+    e.preventDefault()
+    const title = unapprovedInput.trim() || 'Random YouTube / Reddit Tab'
+    setUnapprovedInput('')
+    onTriggerUnauthorizedTab(title)
+  }
+
   return (
     <div className="flex flex-col gap-2.5 rounded-xl border border-stone-800 bg-stone-900/95 p-3 text-xs">
       {/* Header & Lock State */}
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-1.5 font-mono font-bold text-stone-100">
           <ShieldCheck className="h-4 w-4 text-emerald-400" />
-          <span>Allowed Tabs Whitelist ({allowedTabs.length})</span>
+          <span>Allowed Existing Tabs ({allowedTabs.length})</span>
         </div>
 
         {!isWhitelistLocked ? (
@@ -89,7 +100,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
             <button
               onClick={onUnlockWhitelistReset}
               className="rounded-md border border-stone-700 bg-stone-800 p-1 text-stone-400 hover:text-stone-200"
-              title="Reset session to edit initial root tabs"
+              title="Unlock to edit initial root tabs"
             >
               <Unlock className="h-3 w-3" />
             </button>
@@ -97,20 +108,21 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
         )}
       </div>
 
-      <p className="font-mono text-[10.5px] text-stone-400 leading-snug">
-        {!isWhitelistLocked
-          ? 'Step 1: Define the specific tabs you can open at the start of your session, then lock it.'
-          : 'Whitelist locked! You can switch between these tabs or expand sub-tabs from them, but opening any unrelated new tab kills a leaf.'}
-      </p>
+      {/* Status Notice: Switching to existing tabs is SAFE */}
+      <div className="rounded-lg border border-emerald-500/30 bg-emerald-950/30 px-2.5 py-1.5 font-mono text-[10px] text-emerald-200 leading-snug">
+        ✓ <strong>Existing Tabs Safe:</strong> Switching between your existing browser tabs is{' '}
+        <strong>ALLOWED</strong> and keeps your vine growing! Violations only happen if you
+        open an unapproved new tab or doomscroll-hop (4+ rapid switches in 15s).
+      </div>
 
       {/* Initial Setup Form (Only when unlocked at start of session) */}
-      {!isWhitelistLocked && (
+      {!isWhitelistLocked ? (
         <form onSubmit={handleAddInitial} className="flex gap-1.5">
           <input
             type="text"
             value={newTitle}
             onChange={(e) => setNewTitle(e.target.value)}
-            placeholder="Initial Tab (e.g. Figma Spec, Docs)"
+            placeholder="Add your existing open tab (e.g. Docs, IDE)..."
             className="flex-1 rounded-lg border border-stone-700 bg-stone-950 px-2.5 py-1 font-mono text-[11px] text-stone-100 focus:border-emerald-500 focus:outline-none"
           />
           <input
@@ -118,7 +130,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
             value={newUrl}
             onChange={(e) => setNewUrl(e.target.value)}
             placeholder="URL (optional)"
-            className="w-28 rounded-lg border border-stone-700 bg-stone-950 px-2 py-1 font-mono text-[11px] text-stone-300 focus:border-emerald-500 focus:outline-none"
+            className="w-24 rounded-lg border border-stone-700 bg-stone-950 px-2 py-1 font-mono text-[11px] text-stone-300 focus:border-emerald-500 focus:outline-none"
           />
           <button
             type="submit"
@@ -127,10 +139,27 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
             <Plus className="h-3 w-3" /> Add
           </button>
         </form>
+      ) : (
+        /* When locked, trying to open a brand new root tab triggers violation! */
+        <form onSubmit={handleTryOpenUnapproved} className="flex gap-1.5">
+          <input
+            type="text"
+            value={unapprovedInput}
+            onChange={(e) => setUnapprovedInput(e.target.value)}
+            placeholder="Try opening a new unapproved root tab..."
+            className="flex-1 rounded-lg border border-rose-500/30 bg-stone-950 px-2.5 py-1 font-mono text-[10.5px] text-stone-200 focus:border-rose-500 focus:outline-none"
+          />
+          <button
+            type="submit"
+            className="flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-950/50 px-2 py-1 font-mono text-[10px] font-bold text-rose-300 hover:bg-rose-900/60 shrink-0"
+          >
+            <ShieldAlert className="h-3 w-3" /> Open New Tab
+          </button>
+        </form>
       )}
 
       {/* Allowed Tabs Tree (Root tabs + Expanded Sub-tabs) */}
-      <div className="max-h-40 space-y-1.5 overflow-y-auto pr-1">
+      <div className="max-h-36 space-y-1.5 overflow-y-auto pr-1">
         {rootTabs.map((tab) => {
           const children = getChildren(tab.id)
           const isSelected = activeAllowedTabId === tab.id
@@ -141,20 +170,28 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
               className="rounded-lg border border-stone-800 bg-stone-950/80 p-2"
             >
               <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-center gap-1.5 min-w-0">
                   <button
-                    onClick={() => onSwitchToAllowedTab(tab)}
+                    onClick={() => onSwitchToAllowedTab(tab, false)}
                     className={`flex items-center gap-1.5 truncate rounded-md px-2 py-0.5 font-mono text-[11px] font-bold transition ${
                       isSelected
                         ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                         : 'bg-stone-900 text-stone-200 hover:bg-stone-800'
                     }`}
-                    title="Click before/when switching to this tab so your roommate knows it's authorized"
+                    title="Select as active existing tab"
                   >
                     {isSelected && <Check className="h-3 w-3 text-emerald-400 shrink-0" />}
                     <span className="truncate">{tab.title}</span>
-                    <ExternalLink className="h-2.5 w-2.5 opacity-60 shrink-0" />
                   </button>
+                  {tab.url && tab.url.startsWith('http') && (
+                    <button
+                      onClick={() => onSwitchToAllowedTab(tab, true)}
+                      className="rounded p-1 text-stone-500 hover:bg-stone-800 hover:text-stone-200"
+                      title={`Launch ${tab.url}`}
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-1 shrink-0">
@@ -190,7 +227,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
                     type="text"
                     value={expandTitle}
                     onChange={(e) => setExpandTitle(e.target.value)}
-                    placeholder={`Sub-tab from ${tab.title}...`}
+                    placeholder={`Expand child tab from ${tab.title}...`}
                     className="flex-1 rounded border border-stone-700 bg-stone-900 px-2 py-0.5 font-mono text-[10px] text-stone-100 focus:border-teal-500 focus:outline-none"
                     autoFocus
                   />
@@ -214,7 +251,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
                         className="flex items-center justify-between gap-2"
                       >
                         <button
-                          onClick={() => onSwitchToAllowedTab(child)}
+                          onClick={() => onSwitchToAllowedTab(child, false)}
                           className={`flex items-center gap-1.5 truncate rounded px-2 py-0.5 font-mono text-[10.5px] transition ${
                             isChildActive
                               ? 'bg-teal-500/20 text-teal-200 border border-teal-500/40 font-bold'
@@ -237,18 +274,14 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
         })}
       </div>
 
-      {/* Footer: Test Unauthorized New Tab vs Authorized Switch */}
-      <div className="flex items-center justify-between border-t border-stone-800/80 pt-2">
-        <span className="font-mono text-[10px] text-stone-400">
-          Click an allowed tab above to switch safely (15s pass).
+      {/* Footer: Extension Status */}
+      <div className="flex items-center justify-between border-t border-stone-800/80 pt-1.5 font-mono text-[9.5px] text-stone-400">
+        <span className="flex items-center gap-1">
+          <Puzzle className="h-3 w-3 text-teal-400" />
+          {extensionConnected
+            ? 'Chrome Extension Active: Syncing real browser tabs'
+            : 'Smart Tab Mode: Existing tabs allowed · Rapid tab-hopping blocked'}
         </span>
-        <button
-          onClick={onTriggerUnauthorizedTab}
-          className="flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-950/40 px-2 py-1 font-mono text-[10px] font-semibold text-rose-300 hover:bg-rose-900/50"
-        >
-          <ShieldAlert className="h-3 w-3" />
-          Sim Unapproved Tab
-        </button>
       </div>
     </div>
   )

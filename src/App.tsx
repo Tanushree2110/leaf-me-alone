@@ -6,22 +6,28 @@ import {
   ChevronDown,
   ChevronUp,
   ClipboardList,
-  EyeOff,
+  CloudRain,
+  Coffee,
   FastForward,
   GitBranch,
   Layers,
   Leaf,
+  Lock,
+  Pause,
   Play,
   Plus,
   RotateCcw,
   ShieldAlert,
   ShieldCheck,
-  Sliders,
   Smartphone,
   Sparkles,
   Sun,
   ThermometerSnowflake,
+  Timer,
   Video,
+  Volume2,
+  VolumeX,
+  Wand2,
   X,
 } from 'lucide-react'
 import {
@@ -41,15 +47,16 @@ import {
   PHONE_DETECTED_QUOTES,
   pickRandomDialogue,
 } from './utils/dialogue'
+import { soundFX } from './utils/sound'
 import { StudioCanvas } from './components/StudioCanvas'
 import { PolaroidModal } from './components/PolaroidModal'
 import { WebcamGuard } from './components/WebcamGuard'
 import { AllowedTabsManager } from './components/AllowedTabsManager'
+import { PomodoroConfig, PomodoroPanel } from './components/PomodoroPanel'
 
-type ExpandablePanel = 'tabs' | 'upgrades' | 'simulator' | 'log' | null
+type ExpandablePanel = 'pomodoro' | 'tabs' | 'upgrades' | 'log' | 'demo' | null
 
 function generateProceduralVineSegments(): VineSegment[] {
-  // 15 points = 14 climbing segments winding up the windowpane and arching across the top
   const points = [
     { x: 106, y: 342 },
     { x: 94, y: 312 },
@@ -91,7 +98,7 @@ function generateProceduralVineSegments(): VineSegment[] {
 const BLOSSOM_COLORS = ['#f472b6', '#fb7185', '#fde047', '#c084fc', '#60a5fa']
 
 function createInitialLeaves(segments: VineSegment[]): LeafNode[] {
-  const initialCount = 6
+  const initialCount = 5
   const list: LeafNode[] = []
   for (let i = 0; i < initialCount; i++) {
     const segIdx = Math.min(i, segments.length - 1)
@@ -122,9 +129,9 @@ function createInitialLeaves(segments: VineSegment[]): LeafNode[] {
 }
 
 const INITIAL_ALLOWED_TABS: AllowedTab[] = [
-  { id: 'tab-1', title: 'VS Code / Localhost', url: 'http://localhost:5173' },
-  { id: 'tab-2', title: 'React / MDN Docs', url: 'https://react.dev' },
-  { id: 'tab-3', title: 'Figma Sprint Spec', url: 'https://figma.com' },
+  { id: 'tab-1', title: 'IDE / Localhost', url: 'http://localhost:5173' },
+  { id: 'tab-2', title: 'Docs & Reference', url: 'https://react.dev' },
+  { id: 'tab-3', title: 'Design / Sprint Spec', url: 'https://figma.com' },
 ]
 
 export function App() {
@@ -134,15 +141,32 @@ export function App() {
   const [focusMode, setFocusMode] = useState<FocusMode>('locked_in')
   const [roommateState, setRoommateState] = useState<RoommateState>('typing')
   const [leaves, setLeaves] = useState<LeafNode[]>(() => createInitialLeaves(vineSegments))
-  const [vineGrowthProgress, setVineGrowthProgress] = useState<number>(0.45)
-  const [nextLeafProgress, setNextLeafProgress] = useState<number>(0.25)
+  const [vineGrowthProgress, setVineGrowthProgress] = useState<number>(0.38)
+  const [nextLeafProgress, setNextLeafProgress] = useState<number>(0.12)
   const [upgrades, setUpgrades] = useState<RoomUpgrade[]>(INITIAL_UPGRADES)
   const [daysSinceDoomscroll, setDaysSinceDoomscroll] = useState<number>(4)
   const [dialogueText, setDialogueText] = useState<string>(
-    'Headphones on. Eyes on screen (or glancing at keyboard to type)—watch the ivy vine grow!'
+    'Headphones on. Your existing tabs are whitelisted & safe—plant growth is synced to your focus timer!'
   )
 
-  // Expandable UI Drawers & Modals (Zero-scroll single-screen layout)
+  // Sound & Ambient Rain state
+  const [soundEnabled, setSoundEnabled] = useState<boolean>(true)
+  const [ambientRainOn, setAmbientRainOn] = useState<boolean>(false)
+
+  // Opt-In Customizable Pomodoro State
+  const [pomodoro, setPomodoro] = useState<PomodoroConfig>({
+    enabled: true, // Opt-in active by default so leaf growth is paced to Pomodoro
+    isRunning: true,
+    phase: 'focus',
+    focusMinutes: 25,
+    breakMinutes: 5,
+    leavesPerCycle: 5,
+    remainingSeconds: 25 * 60,
+    completedCycles: 0,
+  })
+  const leafAccumulatorSecRef = useRef<number>(0)
+
+  // Expandable UI Drawers & Modals
   const [activePanel, setActivePanel] = useState<ExpandablePanel>(null)
   const [isPolaroidOpen, setIsPolaroidOpen] = useState<boolean>(false)
   const [isWebcamExpanded, setIsWebcamExpanded] = useState<boolean>(true)
@@ -155,21 +179,24 @@ export function App() {
   const [allowedTabs, setAllowedTabs] = useState<AllowedTab[]>(INITIAL_ALLOWED_TABS)
   const [isWhitelistLocked, setIsWhitelistLocked] = useState<boolean>(false)
   const [activeAllowedTabId, setActiveAllowedTabId] = useState<string | null>('tab-1')
-  const authorizedSwitchUntilRef = useRef<number>(0)
-  const [authorizedPassSecondsLeft, setAuthorizedPassSecondsLeft] = useState<number>(0)
+  const [extensionConnected] = useState<boolean>(false)
+
+  // Track recent browser tab switches so single switches to existing tabs are SAFE,
+  // and only rapid doomscroll tab-hopping (4+ switches within 15 seconds) counts as a violation
+  const recentTabSwitchTimestampsRef = useRef<number[]>([])
 
   const [stats, setStats] = useState<SessionStats>({
-    focusSeconds: 240,
-    unbrokenFocusSeconds: 240,
+    focusSeconds: 0,
+    unbrokenFocusSeconds: 0,
     comebackProgressSeconds: 0,
     tabSwitches: 0,
     authorizedTabSwitches: 0,
     phoneAlerts: 0,
-    leavesGrown: 6,
+    leavesGrown: 5,
     leavesLost: 0,
     goldenLeavesPainted: 0,
     roomTempCelsius: 22,
-    currentTask: 'Ship Leaf Me Alone MVP',
+    currentTask: 'Deep Work Sprint',
     speedMultiplier: 1,
   })
 
@@ -182,7 +209,7 @@ export function App() {
         second: '2-digit',
       }),
       type: 'focus',
-      message: 'Session started. Looking at screen or typing on keyboard grows a new leaf every ~7s!',
+      message: 'Session started. Existing tabs are safe to switch between; vine synced to Pomodoro.',
       quote: 'Chlorophyll levels optimal. Approved workspace tabs only.',
     },
   ])
@@ -206,13 +233,14 @@ export function App() {
   )
 
   const togglePanel = (panel: ExpandablePanel) => {
+    soundFX.playSoftClick()
     setActivePanel((prev) => (prev === panel ? null : panel))
   }
 
-  // Helper to sprout one new healthy emerald leaf on the next available vine node
+  // Sprout one new healthy emerald leaf on the next available vine node
   const sproutOneLeaf = useCallback(() => {
+    soundFX.playLeafSprout()
     setLeaves((prev) => {
-      // First heal all currently attached/dying leaves toward 1.0 health
       const healed = prev.map((l) =>
         l.status === 'attached' || l.status === 'dying'
           ? {
@@ -229,7 +257,6 @@ export function App() {
         return healed
       }
 
-      // Find the lowest segmentIndex (0..13) that doesn't currently have an attached leaf
       const occupiedIndices = new Set(attached.map((l) => l.segmentIndex))
       let targetSegIdx = 0
       for (let i = 0; i < vineSegments.length; i++) {
@@ -264,7 +291,7 @@ export function App() {
       }
 
       const nextCount = attached.length + 1
-      setVineGrowthProgress(Math.min(1, Math.max(0.2, (nextCount + 0.5) / vineSegments.length)))
+      setVineGrowthProgress(Math.min(1, Math.max(0.25, (nextCount + 0.5) / vineSegments.length)))
 
       return [...healed, newLeaf]
     })
@@ -279,14 +306,17 @@ export function App() {
       customQuotes?: string[],
       logType: ActivityLogItem['type'] = 'distraction'
     ) => {
+      // If currently on a Pomodoro Break, never penalize!
+      if (pomodoro.enabled && pomodoro.phase === 'break') return
+
       setDaysSinceDoomscroll(0)
+      leafAccumulatorSecRef.current = 0
       setNextLeafProgress(0)
 
       setLeaves((prevLeaves) => {
         const attached = prevLeaves.filter((l) => l.status === 'attached' || l.status === 'dying')
         if (attached.length === 0) return prevLeaves
 
-        // Pick the highest segmentIndex attached leaf to wither and fall
         const sorted = [...attached].sort((a, b) => b.segmentIndex - a.segmentIndex)
         const victim = sorted[0]
         const seg = vineSegments[Math.min(victim.segmentIndex, vineSegments.length - 1)]
@@ -312,6 +342,7 @@ export function App() {
         })
 
         if (remainingAfterDrop === 1) {
+          soundFX.playThunderClimax()
           setFocusMode('last_leaf_climax')
           setRoommateState('dramatic_sickbed')
           const quote = pickRandomDialogue('dramatic_sickbed', victim.id)
@@ -322,6 +353,7 @@ export function App() {
             quote
           )
         } else {
+          soundFX.playClipboardPenalty()
           setFocusMode('distracted')
           const nextStates: RoommateState[] = [
             'glaring_with_clipboard',
@@ -359,50 +391,54 @@ export function App() {
         roomTempCelsius: Math.max(7, prev.roomTempCelsius - 3.5),
       }))
     },
-    [appendLog, vineSegments]
+    [appendLog, vineSegments, pomodoro.enabled, pomodoro.phase]
   )
 
-  const handleSwitchToAllowedTab = (tab: AllowedTab) => {
+  // Select an Allowed Whitelisted Tab (does not open duplicate window unless openNewWindow=true)
+  const handleSwitchToAllowedTab = (tab: AllowedTab, openNewWindow = false) => {
+    soundFX.playSoftClick()
     setActiveAllowedTabId(tab.id)
-    authorizedSwitchUntilRef.current = Date.now() + 20000
-    setAuthorizedPassSecondsLeft(20)
-
     setStats((prev) => ({
       ...prev,
       authorizedTabSwitches: prev.authorizedTabSwitches + 1,
     }))
 
-    const quote = `Switching to whitelisted tab "${tab.title}". Approved—keep that focus flow going!`
+    const quote = `Working on whitelisted tab "${tab.title}". Approved—your vine keeps growing!`
     setDialogueText(quote)
     appendLog(
       'tab_whitelist',
-      `Switched to allowed tab: "${tab.title}"${tab.parentId ? ' (Expanded Sub-Tab)' : ''}`,
+      `Active allowed tab: "${tab.title}"${tab.parentId ? ' (Expanded Sub-Tab)' : ''}`,
       quote
     )
 
-    if (tab.url && tab.url.startsWith('http') && tab.url !== 'http://localhost:5173') {
+    if (openNewWindow && tab.url && tab.url.startsWith('http')) {
       window.open(tab.url, '_blank', 'noopener,noreferrer')
     }
   }
 
-  useEffect(() => {
-    if (authorizedPassSecondsLeft <= 0) return
-    const timer = setInterval(() => {
-      const rem = Math.max(0, Math.ceil((authorizedSwitchUntilRef.current - Date.now()) / 1000))
-      setAuthorizedPassSecondsLeft(rem)
-    }, 500)
-    return () => clearInterval(timer)
-  }, [authorizedPassSecondsLeft])
-
+  // Real browser `visibilitychange` listener:
+  // Normal switching to your existing open browser tabs is SAFE & ALLOWED!
+  // Only rapid doomscroll tab-hopping (4+ tab switches within 15 seconds) triggers a violation.
   useEffect(() => {
     const handleVisibility = () => {
       if (document.hidden) {
-        if (Date.now() <= authorizedSwitchUntilRef.current) {
-          return
+        const now = Date.now()
+        const recent = recentTabSwitchTimestampsRef.current.filter((t) => now - t < 15000)
+        recent.push(now)
+        recentTabSwitchTimestampsRef.current = recent
+
+        if (recent.length >= 4) {
+          recentTabSwitchTimestampsRef.current = []
+          triggerDistraction(
+            'Rapid Tab-Hopping Detected (4+ switches in 15s — Doomscroll cadence!)'
+          )
+        } else {
+          // Normal switch to an existing allowed tab: completely safe!
+          setStats((prev) => ({
+            ...prev,
+            authorizedTabSwitches: prev.authorizedTabSwitches + 1,
+          }))
         }
-        triggerDistraction(
-          'Switched to an UNAPPROVED browser tab (not selected from your Allowed Tabs Whitelist)'
-        )
       }
     }
     document.addEventListener('visibilitychange', handleVisibility)
@@ -411,7 +447,7 @@ export function App() {
 
   const handlePhoneDetected = useCallback(() => {
     triggerDistraction(
-      'Webcam Guard: Stared down below horizon >6.5s (Phone Doomscroll)!',
+      'Webcam Guard: Stared down at phone (>6.5s below horizon)!',
       PHONE_DETECTED_QUOTES,
       'camera'
     )
@@ -429,12 +465,13 @@ export function App() {
     if (focusMode === 'distracted') {
       setFocusMode('locked_in')
       setRoommateState('typing')
-      setDialogueText('Eyes on screen / typing! Putting the clipboard away and regrowing the vine.')
+      setDialogueText('Eyes back on screen! Putting the clipboard away and regrowing the vine.')
     }
   }, [focusMode])
 
   const handleAddInitialTab = (title: string, url: string) => {
     if (isWhitelistLocked) return
+    soundFX.playSoftClick()
     setAllowedTabs((prev) => [...prev, { id: `tab-${Date.now()}`, title, url }])
   }
 
@@ -444,6 +481,7 @@ export function App() {
   }
 
   const handleExpandSubTab = (parentId: string, title: string, url: string) => {
+    soundFX.playSoftClick()
     const parent = allowedTabs.find((t) => t.id === parentId)
     const subTab: AllowedTab = {
       id: `sub-${Date.now()}`,
@@ -453,8 +491,6 @@ export function App() {
     }
     setAllowedTabs((prev) => [...prev, subTab])
     setActiveAllowedTabId(subTab.id)
-    authorizedSwitchUntilRef.current = Date.now() + 20000
-    setAuthorizedPassSecondsLeft(20)
     appendLog(
       'tab_whitelist',
       `Expanded sub-tab "${title}" from allowed tab "${parent?.title ?? 'Root'}".`,
@@ -501,10 +537,62 @@ export function App() {
     return () => clearInterval(interval)
   }, [])
 
-  // Main 1-second Focus, Leaf Sprouting & O. Henry Redemption Progression Loop
+  // How many seconds of focus are needed to sprout 1 new leaf:
+  // - If Pomodoro Sync is ON: (focusMinutes * 60) / leavesPerCycle (e.g., 25m / 5 leaves = 300s = 5 mins per leaf)
+  // - If Pomodoro Sync is OFF (Free Focus): 180s (3 mins per leaf)
+  const targetSecondsPerLeaf = useMemo(() => {
+    if (pomodoro.enabled) {
+      return Math.max(20, Math.round((pomodoro.focusMinutes * 60) / Math.max(1, pomodoro.leavesPerCycle)))
+    }
+    return 180
+  }, [pomodoro.enabled, pomodoro.focusMinutes, pomodoro.leavesPerCycle])
+
+  // Main 1-second Focus, Pomodoro Sync & O. Henry Redemption Loop
   useEffect(() => {
     const timer = setInterval(() => {
-      // Only grow when user isn't actively flagged for phone/away
+      const delta = stats.speedMultiplier
+
+      // If Pomodoro is enabled and paused, pause progression
+      if (pomodoro.enabled && !pomodoro.isRunning) return
+
+      // Handle Pomodoro countdown if enabled
+      if (pomodoro.enabled) {
+        setPomodoro((prev) => {
+          const nextRem = prev.remainingSeconds - delta
+          if (nextRem <= 0) {
+            if (prev.phase === 'focus') {
+              // Completed a full Pomodoro Focus Block!
+              soundFX.playGoldenFanfare()
+              sproutOneLeaf()
+              setDialogueText(
+                `Pomodoro #${prev.completedCycles + 1} complete! Vine is thriving—enjoy your ${prev.breakMinutes}m break!`
+              )
+              appendLog(
+                'focus',
+                `Completed ${prev.focusMinutes}m Pomodoro Focus Block! Starting ${prev.breakMinutes}m Break.`
+              )
+              return {
+                ...prev,
+                phase: 'break',
+                remainingSeconds: prev.breakMinutes * 60,
+                completedCycles: prev.completedCycles + 1,
+              }
+            } else {
+              // Break finished -> back to Focus
+              soundFX.playPomodoroBell()
+              setDialogueText('Break complete! Headphones back on—starting next Pomodoro focus block.')
+              return {
+                ...prev,
+                phase: 'focus',
+                remainingSeconds: prev.focusMinutes * 60,
+              }
+            }
+          }
+          return { ...prev, remainingSeconds: nextRem }
+        })
+      }
+
+      // Check camera focus state
       const isCameraFocusedOrTyping =
         !webcamEnabled ||
         cameraStatus === 'focused' ||
@@ -514,41 +602,46 @@ export function App() {
 
       if (!isCameraFocusedOrTyping) return
 
-      // Advance Next-Leaf Growth Bar while focused! (Sprouts a new leaf every ~7 seconds at 1x speed)
-      if (focusMode === 'locked_in' || focusMode === 'golden_comeback') {
-        setVineGrowthProgress((v) => Math.min(1, v + 0.012 * stats.speedMultiplier))
+      // Advance Leaf Growth synced to Pomodoro (or Free Focus cadence)
+      if (
+        (focusMode === 'locked_in' || focusMode === 'golden_comeback') &&
+        (!pomodoro.enabled || pomodoro.phase === 'focus')
+      ) {
+        leafAccumulatorSecRef.current += delta
+        const ratio = leafAccumulatorSecRef.current / targetSecondsPerLeaf
+
+        if (ratio >= 1) {
+          leafAccumulatorSecRef.current = 0
+          setNextLeafProgress(0.02)
+          sproutOneLeaf()
+        } else {
+          setNextLeafProgress(ratio)
+        }
+
+        // Gradually heal any slightly wilted leaves
         setLeaves((prev) =>
           prev.map((l) =>
             l.status === 'attached' && l.health < 1
-              ? { ...l, health: Math.min(1, l.health + 0.08) }
+              ? { ...l, health: Math.min(1, l.health + 0.03) }
               : l
           )
         )
-        setNextLeafProgress((prog) => {
-          const step = 0.15 * Math.min(4, stats.speedMultiplier)
-          if (prog + step >= 1) {
-            sproutOneLeaf()
-            return 0.05
-          }
-          return prog + step
-        })
       }
 
       setStats((prev) => {
-        const delta = prev.speedMultiplier
-
         if (focusMode === 'locked_in' || focusMode === 'golden_comeback') {
           return {
             ...prev,
             focusSeconds: prev.focusSeconds + delta,
             unbrokenFocusSeconds: prev.unbrokenFocusSeconds + delta,
-            roomTempCelsius: Math.min(24, prev.roomTempCelsius + 0.4 * delta),
+            roomTempCelsius: Math.min(24, prev.roomTempCelsius + 0.3 * delta),
           }
         }
 
         if (focusMode === 'last_leaf_climax') {
-          const nextComeback = prev.comebackProgressSeconds + delta * 10
+          const nextComeback = prev.comebackProgressSeconds + delta
           if (nextComeback >= 300) {
+            soundFX.playGoldenFanfare()
             setFocusMode('golden_comeback')
             setRoommateState('painting_golden_leaf')
             sproutOneLeaf()
@@ -556,7 +649,7 @@ export function App() {
             setDialogueText(quote)
             appendLog(
               'redemption',
-              'THE O. HENRY TWIST! Locked in before the last leaf fell — Roommate painted a permanent Golden Leaf on the brick wall!',
+              'THE O. HENRY TWIST! Locked in for 5 straight minutes — Roommate painted a permanent Golden Leaf on the brick wall!',
               quote
             )
             return {
@@ -579,7 +672,18 @@ export function App() {
     }, 1000)
 
     return () => clearInterval(timer)
-  }, [focusMode, webcamEnabled, cameraStatus, stats.speedMultiplier, sproutOneLeaf, appendLog])
+  }, [
+    focusMode,
+    webcamEnabled,
+    cameraStatus,
+    stats.speedMultiplier,
+    pomodoro.enabled,
+    pomodoro.isRunning,
+    pomodoro.phase,
+    targetSecondsPerLeaf,
+    sproutOneLeaf,
+    appendLog,
+  ])
 
   // Unlock cozy studio upgrades automatically as focus time grows
   useEffect(() => {
@@ -595,6 +699,7 @@ export function App() {
       })
       if (newlyUnlocked) {
         const upg = newlyUnlocked as RoomUpgrade
+        soundFX.playLeafSprout()
         appendLog(
           'upgrade',
           `Cozy Studio Upgrade Unlocked (${upg.unlockMinutes}m focus): ${upg.name}!`,
@@ -611,7 +716,8 @@ export function App() {
     const quote = pickRandomDialogue('typing')
     setDialogueText(quote)
     sproutOneLeaf()
-    setNextLeafProgress(0.35)
+    leafAccumulatorSecRef.current = 0
+    setNextLeafProgress(0.1)
 
     setStats((prev) => ({
       ...prev,
@@ -620,14 +726,11 @@ export function App() {
       roomTempCelsius: Math.min(24, prev.roomTempCelsius + 3),
     }))
 
-    appendLog(
-      'focus',
-      'Locked-In Boost (+3m): Sunlight intensified, vine grew upward, and a new emerald leaf bloomed!',
-      quote
-    )
+    appendLog('focus', 'Sprouted a new emerald leaf & boosted studio sunlight!', quote)
   }
 
   const handleTriggerLastLeafClimax = () => {
+    soundFX.playThunderClimax()
     setFocusMode('last_leaf_climax')
     setRoommateState('dramatic_sickbed')
     const quote = pickRandomDialogue('dramatic_sickbed')
@@ -677,6 +780,7 @@ export function App() {
   }
 
   const handleTriggerGoldenLeafTwist = () => {
+    soundFX.playGoldenFanfare()
     setFocusMode('golden_comeback')
     setRoommateState('painting_golden_leaf')
     sproutOneLeaf()
@@ -698,6 +802,7 @@ export function App() {
   }
 
   const handleSweepFloor = () => {
+    soundFX.playSoftClick()
     setRoommateState('sweeping_leaves')
     const quote = pickRandomDialogue('sweeping_leaves')
     setDialogueText(quote)
@@ -708,27 +813,35 @@ export function App() {
   }
 
   const handleResetSession = () => {
+    soundFX.playSoftClick()
     setFocusMode('locked_in')
     setRoommateState('typing')
     setLeaves(createInitialLeaves(vineSegments))
-    setVineGrowthProgress(0.45)
-    setNextLeafProgress(0.25)
+    setVineGrowthProgress(0.38)
+    leafAccumulatorSecRef.current = 0
+    setNextLeafProgress(0.1)
     setDaysSinceDoomscroll(4)
     setDialogueText(pickRandomDialogue('typing'))
     setStats({
-      focusSeconds: 240,
-      unbrokenFocusSeconds: 240,
+      focusSeconds: 0,
+      unbrokenFocusSeconds: 0,
       comebackProgressSeconds: 0,
       tabSwitches: 0,
       authorizedTabSwitches: 0,
       phoneAlerts: 0,
-      leavesGrown: 6,
+      leavesGrown: 5,
       leavesLost: 0,
       goldenLeavesPainted: 0,
       roomTempCelsius: 22,
       currentTask: stats.currentTask,
       speedMultiplier: 1,
     })
+  }
+
+  const formatTimer = (sec: number) => {
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
   }
 
   const attachedLeavesCount = leaves.filter(
@@ -742,17 +855,23 @@ export function App() {
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-stone-950 text-stone-100 select-none">
-      {/* 1. COMPACT TOP HEADER BAR */}
-      <header className="flex h-12 shrink-0 items-center justify-between gap-2 border-b border-stone-800 bg-stone-950 px-3">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/15 text-emerald-400">
+      {/* 1. CLEAN, BEAUTIFUL TOP NAVIGATION BAR */}
+      <header className="flex h-13 shrink-0 items-center justify-between gap-3 border-b border-stone-800/80 bg-stone-950/95 px-4 py-2">
+        {/* Left: Brand & Current Focus Task */}
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-emerald-500/30 bg-emerald-500/15 text-emerald-400 shadow-inner">
             <Leaf className="h-4 w-4" />
           </div>
-          <span className="font-serif text-sm font-bold tracking-tight text-stone-100 shrink-0">
-            Leaf Me Alone
-          </span>
+          <div className="shrink-0">
+            <h1 className="font-serif text-base font-bold leading-none tracking-tight text-stone-100">
+              Leaf Me Alone
+            </h1>
+            <span className="font-mono text-[9.5px] text-stone-400">
+              Cozy Focus Roommate
+            </span>
+          </div>
 
-          <div className="hidden sm:flex items-center gap-1.5 rounded-lg border border-stone-800 bg-stone-900/90 px-2 py-1">
+          <div className="hidden sm:flex items-center gap-1.5 rounded-xl border border-stone-800 bg-stone-900/90 px-2.5 py-1">
             <span className="font-mono text-[10px] font-bold uppercase text-emerald-400">
               Task:
             </span>
@@ -760,46 +879,67 @@ export function App() {
               type="text"
               value={stats.currentTask}
               onChange={(e) => setStats((s) => ({ ...s, currentTask: e.target.value }))}
-              className="w-36 bg-transparent font-mono text-[11px] text-stone-100 focus:outline-none"
+              className="w-36 bg-transparent font-mono text-xs text-stone-100 focus:outline-none"
+              placeholder="Current focus task..."
             />
           </div>
         </div>
 
-        {/* Compact Live Telemetry Pills */}
-        <div className="hidden md:flex items-center gap-3 font-mono text-[11px]">
-          <span className="flex items-center gap-1 text-emerald-400">
-            <Play className="h-3 w-3" />
-            {Math.floor(stats.focusSeconds / 60)}m {stats.focusSeconds % 60}s
-          </span>
-          <span className="flex items-center gap-1 text-emerald-300 font-bold">
-            <Leaf className="h-3 w-3" />
-            Leaves: {attachedLeavesCount}/14
-          </span>
-          <span
-            className="flex items-center gap-1 text-teal-300"
-            title="Authorized switches to your whitelisted tabs"
+        {/* Center: Opt-In Customizable Pomodoro Pill */}
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={() => togglePanel('pomodoro')}
+            className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 font-mono text-xs font-bold transition ${
+              activePanel === 'pomodoro'
+                ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200'
+                : pomodoro.enabled
+                ? pomodoro.phase === 'focus'
+                  ? 'border-emerald-500/40 bg-emerald-950/50 text-emerald-300 hover:bg-emerald-900/50'
+                  : 'border-amber-500/40 bg-amber-950/50 text-amber-300 hover:bg-amber-900/50'
+                : 'border-stone-800 bg-stone-900 text-stone-400 hover:text-stone-200'
+            }`}
+            title="Click to customize Opt-In Pomodoro Timer & Leaf Growth Cadence"
           >
-            <ShieldCheck className="h-3 w-3" />
-            Allowed: {stats.authorizedTabSwitches}
-          </span>
-          <span
-            className="flex items-center gap-1 text-rose-400"
-            title="Unauthorized tab switches & phone doomscrolls"
-          >
-            <EyeOff className="h-3 w-3" />
-            Violations: {stats.tabSwitches + stats.phoneAlerts}
-          </span>
-          <span className="flex items-center gap-1 text-amber-300">
-            <Award className="h-3 w-3" />
-            Gold: {stats.goldenLeavesPainted}
-          </span>
+            <Timer className="h-3.5 w-3.5" />
+            {pomodoro.enabled ? (
+              <>
+                <span>
+                  {pomodoro.phase === 'focus' ? 'Focus' : 'Break'}:{' '}
+                  {formatTimer(pomodoro.remainingSeconds)}
+                </span>
+                <span className="hidden md:inline rounded bg-black/30 px-1.5 py-0.5 text-[10px] text-emerald-300/90">
+                  {pomodoro.leavesPerCycle}🌱/{pomodoro.focusMinutes}m
+                </span>
+              </>
+            ) : (
+              <span>Pomodoro: Off (Free Focus)</span>
+            )}
+            <ChevronDown className="h-3 w-3 opacity-70" />
+          </button>
+
+          {pomodoro.enabled && (
+            <button
+              onClick={() => {
+                soundFX.playSoftClick()
+                setPomodoro((p) => ({ ...p, isRunning: !p.isRunning }))
+              }}
+              className="rounded-xl border border-stone-800 bg-stone-900 p-1.5 text-stone-300 hover:bg-stone-800 hover:text-white"
+              title={pomodoro.isRunning ? 'Pause Pomodoro' : 'Resume Pomodoro'}
+            >
+              {pomodoro.isRunning ? (
+                <Pause className="h-3.5 w-3.5 text-amber-400" />
+              ) : (
+                <Play className="h-3.5 w-3.5 text-emerald-400" />
+              )}
+            </button>
+          )}
         </div>
 
-        {/* Expandable Section Menu Buttons */}
+        {/* Right: Clean Expandable Menus + SoundFX + Polaroid */}
         <div className="flex items-center gap-1.5">
           <button
             onClick={() => togglePanel('tabs')}
-            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-semibold transition ${
+            className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 font-mono text-xs font-semibold transition ${
               activePanel === 'tabs'
                 ? 'border-emerald-500 bg-emerald-500/20 text-emerald-200'
                 : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
@@ -807,64 +947,96 @@ export function App() {
           >
             <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
             <span>Tabs ({allowedTabs.length})</span>
-            {activePanel === 'tabs' ? (
-              <ChevronUp className="h-3 w-3" />
-            ) : (
-              <ChevronDown className="h-3 w-3" />
-            )}
           </button>
 
           <button
             onClick={() => togglePanel('upgrades')}
-            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-semibold transition ${
+            className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 font-mono text-xs font-semibold transition ${
               activePanel === 'upgrades'
                 ? 'border-amber-500 bg-amber-500/20 text-amber-200'
                 : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
             }`}
           >
             <Layers className="h-3.5 w-3.5 text-amber-400" />
-            <span>Room ({unlockedUpgradesCount}/5)</span>
-          </button>
-
-          <button
-            onClick={() => togglePanel('simulator')}
-            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-semibold transition ${
-              activePanel === 'simulator'
-                ? 'border-purple-500 bg-purple-500/20 text-purple-200'
-                : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
-            }`}
-          >
-            <Sliders className="h-3.5 w-3.5 text-purple-400" />
-            <span className="hidden sm:inline">States</span>
+            <span className="hidden sm:inline">Room ({unlockedUpgradesCount}/5)</span>
           </button>
 
           <button
             onClick={() => togglePanel('log')}
-            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-semibold transition ${
+            className={`flex items-center gap-1.5 rounded-xl border px-2.5 py-1.5 font-mono text-xs font-semibold transition ${
               activePanel === 'log'
                 ? 'border-rose-500 bg-rose-500/20 text-rose-200'
                 : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
             }`}
+            title="Roommate's Clipboard Log"
           >
             <ClipboardList className="h-3.5 w-3.5 text-rose-400" />
-            <span className="hidden sm:inline">Log</span>
           </button>
 
+          {/* SoundFX Toggle */}
           <button
-            onClick={() => setIsPolaroidOpen(true)}
-            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-2.5 py-1 font-mono text-[11px] font-bold text-white hover:bg-emerald-500"
+            onClick={() => {
+              const next = !soundEnabled
+              setSoundEnabled(next)
+              soundFX.setEnabled(next)
+              if (next) soundFX.playSoftClick()
+              else setAmbientRainOn(false)
+            }}
+            className={`rounded-xl border p-1.5 transition ${
+              soundEnabled
+                ? 'border-stone-800 bg-stone-900 text-emerald-400 hover:bg-stone-800'
+                : 'border-stone-800 bg-stone-900 text-stone-500 hover:text-stone-300'
+            }`}
+            title={soundEnabled ? 'Sound Effects: ON' : 'Sound Effects: Muted'}
+          >
+            {soundEnabled ? <Volume2 className="h-4 w-4" /> : <VolumeX className="h-4 w-4" />}
+          </button>
+
+          {/* Cozy Lo-Fi Rain Ambient Sound Toggle */}
+          <button
+            onClick={() => {
+              if (!soundEnabled) {
+                setSoundEnabled(true)
+                soundFX.setEnabled(true)
+              }
+              const playing = soundFX.toggleAmbientRain()
+              setAmbientRainOn(playing)
+            }}
+            className={`rounded-xl border p-1.5 transition ${
+              ambientRainOn
+                ? 'border-sky-500/50 bg-sky-500/20 text-sky-300'
+                : 'border-stone-800 bg-stone-900 text-stone-400 hover:bg-stone-800'
+            }`}
+            title="Toggle Cozy Lo-Fi Rain Sound"
+          >
+            <CloudRain className="h-4 w-4" />
+          </button>
+
+          {/* Export Polaroid Card */}
+          <button
+            onClick={() => {
+              soundFX.playSoftClick()
+              setIsPolaroidOpen(true)
+            }}
+            className="flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 font-mono text-xs font-bold text-white shadow-md shadow-emerald-950/50 hover:bg-emerald-500"
           >
             <Camera className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Polaroid</span>
+            <span className="hidden md:inline">Polaroid</span>
           </button>
         </div>
       </header>
 
-      {/* 2. WHITELISTED TABS QUICK-SWITCH BAR */}
-      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-stone-800/80 bg-stone-900/60 px-3 overflow-x-auto">
+      {/* 2. SIMPLE, CLEAR ALLOWED TABS BAR */}
+      <div className="flex h-9 shrink-0 items-center justify-between gap-2 border-b border-stone-800/70 bg-stone-900/50 px-4 overflow-x-auto">
         <div className="flex items-center gap-1.5 min-w-0">
-          <span className="font-mono text-[10px] font-bold uppercase tracking-wider text-stone-400 shrink-0">
-            {isWhitelistLocked ? '🔒 Allowed Tabs:' : '🔓 Initial Tabs:'}
+          <span className="flex items-center gap-1 font-mono text-[10.5px] font-bold text-stone-400 shrink-0">
+            {isWhitelistLocked ? (
+              <>
+                <Lock className="h-3 w-3 text-amber-400" /> Whitelisted Tabs:
+              </>
+            ) : (
+              'Initial Allowed Tabs:'
+            )}
           </span>
 
           {allowedTabs.map((tab) => {
@@ -872,13 +1044,12 @@ export function App() {
             return (
               <button
                 key={tab.id}
-                onClick={() => handleSwitchToAllowedTab(tab)}
-                className={`flex items-center gap-1 rounded-md border px-2 py-0.5 font-mono text-[10.5px] font-medium transition shrink-0 ${
+                onClick={() => handleSwitchToAllowedTab(tab, false)}
+                className={`flex items-center gap-1 rounded-lg border px-2.5 py-0.5 font-mono text-[11px] font-medium transition shrink-0 ${
                   isSelected
                     ? 'border-emerald-500/50 bg-emerald-500/20 text-emerald-200'
                     : 'border-stone-800 bg-stone-950 text-stone-300 hover:border-stone-700'
                 }`}
-                title="Click to authorize switching to this allowed tab"
               >
                 {tab.parentId && <GitBranch className="h-2.5 w-2.5 text-teal-400" />}
                 <span>{tab.title}</span>
@@ -888,29 +1059,35 @@ export function App() {
           })}
 
           <button
-            onClick={() => setActivePanel('tabs')}
-            className="flex items-center gap-1 rounded-md border border-dashed border-stone-700 px-2 py-0.5 font-mono text-[10px] text-stone-400 hover:border-emerald-500/50 hover:text-emerald-300 shrink-0"
+            onClick={() => togglePanel('tabs')}
+            className="flex items-center gap-1 rounded-lg border border-dashed border-stone-700 px-2 py-0.5 font-mono text-[10.5px] text-stone-400 hover:border-emerald-500/50 hover:text-emerald-300 shrink-0"
           >
             <Plus className="h-2.5 w-2.5" />
-            {isWhitelistLocked ? 'Expand from Tab' : 'Configure / Lock'}
+            {isWhitelistLocked ? 'Expand Sub-Tab' : 'Add / Lock Initial Tabs'}
           </button>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0 font-mono text-[10px]">
-          {authorizedPassSecondsLeft > 0 ? (
-            <span className="rounded bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 font-bold text-emerald-300">
-              Safe Tab Switch Pass: {authorizedPassSecondsLeft}s
-            </span>
-          ) : (
-            <span className="text-stone-400 hidden lg:inline">
-              Keyboard glances (6.5s grace) = SAFE · Unapproved tab = Leaf drops
-            </span>
+        <div className="hidden lg:flex items-center gap-3 shrink-0 font-mono text-[10.5px] text-stone-400">
+          <span className="text-emerald-400/90">
+            ✓ Existing tabs safe ({stats.authorizedTabSwitches} switches)
+          </span>
+          <span>·</span>
+          <span className="text-rose-400/90">
+            Violations: {stats.tabSwitches + stats.phoneAlerts}
+          </span>
+          {stats.goldenLeavesPainted > 0 && (
+            <>
+              <span>·</span>
+              <span className="text-amber-300 font-bold">
+                🏆 {stats.goldenLeavesPainted} Gold
+              </span>
+            </>
           )}
         </div>
       </div>
 
-      {/* 3. MAIN CENTER STAGE (Fits remaining viewport height with 0 scrolling) */}
-      <main className="relative flex flex-1 min-h-0 w-full items-center justify-center p-2.5 overflow-hidden">
+      {/* 3. MAIN CENTER STUDIO STAGE (Zero scroll, clean & spacious) */}
+      <main className="relative flex flex-1 min-h-0 w-full items-center justify-center p-3 overflow-hidden">
         <div className="h-full w-full max-w-5xl">
           <StudioCanvas
             focusMode={focusMode}
@@ -966,15 +1143,15 @@ export function App() {
             >
               <Video className="h-3.5 w-3.5" />
               <span>
-                Cam Guard:{' '}
+                Cam:{' '}
                 {cameraStatus === 'phone_detected'
                   ? 'PHONE DETECTED!'
                   : cameraStatus === 'away_detected'
-                  ? 'AWAY FROM DESK!'
+                  ? 'AWAY!'
                   : cameraStatus === 'keyboard_glance'
-                  ? 'KEYBOARD GLANCE (SAFE)'
+                  ? 'TYPING (SAFE)'
                   : webcamEnabled
-                  ? 'ABOVE LINE (GROWING)'
+                  ? 'FOCUSED'
                   : 'OFF'}
               </span>
               <ChevronUp className="h-3 w-3" />
@@ -982,30 +1159,69 @@ export function App() {
           )}
         </div>
 
-        {/* EXPANDABLE OVERLAY DRAWERS */}
+        {/* EXPANDABLE OVERLAY POP-OVER PANELS (Top-Right over Studio) */}
         {activePanel && (
-          <div className="absolute top-3 right-3 z-30 w-full max-w-sm rounded-2xl border border-stone-700 bg-stone-900/95 p-3 shadow-2xl backdrop-blur-md">
-            <div className="mb-2 flex items-center justify-between border-b border-stone-800 pb-1.5">
+          <div className="absolute top-3 right-4 z-30 w-full max-w-md rounded-2xl border border-stone-700/90 bg-stone-900/95 p-3.5 shadow-2xl backdrop-blur-md">
+            <div className="mb-2.5 flex items-center justify-between border-b border-stone-800 pb-2">
               <span className="font-mono text-xs font-bold uppercase tracking-wider text-emerald-400">
-                {activePanel === 'tabs' && 'Allowed Tabs & Branch Expansion'}
+                {activePanel === 'pomodoro' && 'Opt-In Pomodoro & Leaf Pacing'}
+                {activePanel === 'tabs' && 'Allowed Tabs Whitelist & Sub-Tab Tree'}
                 {activePanel === 'upgrades' && 'Cozy Studio Upgrades (5)'}
-                {activePanel === 'simulator' && 'Roommate State & Story Inspector'}
                 {activePanel === 'log' && "Roommate's Clipboard Review Log"}
+                {activePanel === 'demo' && 'Story Simulator & Character States'}
               </span>
               <button
                 onClick={() => setActivePanel(null)}
-                className="rounded-md p-1 text-stone-400 hover:bg-stone-800 hover:text-white"
+                className="rounded-lg p-1 text-stone-400 hover:bg-stone-800 hover:text-white"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
+
+            {activePanel === 'pomodoro' && (
+              <PomodoroPanel
+                config={pomodoro}
+                onUpdateConfig={(partial) => {
+                  soundFX.playSoftClick()
+                  setPomodoro((prev) => ({ ...prev, ...partial }))
+                }}
+                onStartPause={() => {
+                  soundFX.playPomodoroBell()
+                  setPomodoro((prev) => ({ ...prev, isRunning: !prev.isRunning }))
+                }}
+                onResetCycle={() => {
+                  soundFX.playSoftClick()
+                  leafAccumulatorSecRef.current = 0
+                  setNextLeafProgress(0)
+                  setPomodoro((prev) => ({
+                    ...prev,
+                    remainingSeconds:
+                      (prev.phase === 'focus' ? prev.focusMinutes : prev.breakMinutes) * 60,
+                  }))
+                }}
+                onSkipPhase={() => {
+                  soundFX.playPomodoroBell()
+                  setPomodoro((prev) => {
+                    const nextPhase = prev.phase === 'focus' ? 'break' : 'focus'
+                    return {
+                      ...prev,
+                      phase: nextPhase,
+                      remainingSeconds:
+                        (nextPhase === 'focus' ? prev.focusMinutes : prev.breakMinutes) * 60,
+                    }
+                  })
+                }}
+              />
+            )}
 
             {activePanel === 'tabs' && (
               <AllowedTabsManager
                 allowedTabs={allowedTabs}
                 isWhitelistLocked={isWhitelistLocked}
                 activeAllowedTabId={activeAllowedTabId}
+                extensionConnected={extensionConnected}
                 onLockWhitelist={() => {
+                  soundFX.playSoftClick()
                   setIsWhitelistLocked(true)
                   appendLog(
                     'tab_whitelist',
@@ -1017,8 +1233,10 @@ export function App() {
                 onRemoveInitialTab={handleRemoveInitialTab}
                 onExpandSubTab={handleExpandSubTab}
                 onSwitchToAllowedTab={handleSwitchToAllowedTab}
-                onTriggerUnauthorizedTab={() =>
-                  triggerDistraction('Opened an UNAPPROVED new tab outside whitelist!')
+                onTriggerUnauthorizedTab={(title) =>
+                  triggerDistraction(
+                    `Tried opening unapproved new tab "${title || 'Unwhitelisted Tab'}" while whitelist was locked!`
+                  )
                 }
               />
             )}
@@ -1027,12 +1245,13 @@ export function App() {
               <div className="space-y-1.5 max-h-64 overflow-y-auto pr-1">
                 <div className="flex items-center justify-between pb-1">
                   <span className="font-mono text-[10.5px] text-stone-400">
-                    Click any item to toggle or unlock via focus time:
+                    Unlocks automatically with focus time (or click to preview):
                   </span>
                   <button
-                    onClick={() =>
+                    onClick={() => {
+                      soundFX.playLeafSprout()
                       setUpgrades((prev) => prev.map((u) => ({ ...u, unlocked: true })))
-                    }
+                    }}
                     className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-300"
                   >
                     Unlock All
@@ -1041,13 +1260,14 @@ export function App() {
                 {upgrades.map((u) => (
                   <div
                     key={u.id}
-                    onClick={() =>
+                    onClick={() => {
+                      soundFX.playSoftClick()
                       setUpgrades((prev) =>
                         prev.map((item) =>
                           item.id === u.id ? { ...item, unlocked: !item.unlocked } : item
                         )
                       )
-                    }
+                    }}
                     className={`flex cursor-pointer items-center justify-between rounded-lg border p-2 transition ${
                       u.unlocked
                         ? 'border-emerald-500/40 bg-emerald-950/30 text-stone-100'
@@ -1070,59 +1290,6 @@ export function App() {
                     </span>
                   </div>
                 ))}
-              </div>
-            )}
-
-            {activePanel === 'simulator' && (
-              <div className="space-y-2.5 font-mono text-xs">
-                <p className="text-[10.5px] text-stone-400">
-                  Inspect any of the 6 character states or studio maintenance actions:
-                </p>
-                <div className="grid grid-cols-2 gap-1.5">
-                  {(
-                    [
-                      'typing',
-                      'glaring_with_clipboard',
-                      'sweeping_leaves',
-                      'shivering',
-                      'dramatic_sickbed',
-                      'painting_golden_leaf',
-                    ] as RoommateState[]
-                  ).map((st) => (
-                    <button
-                      key={st}
-                      onClick={() => {
-                        setRoommateState(st)
-                        setDialogueText(pickRandomDialogue(st))
-                        if (st === 'dramatic_sickbed') setFocusMode('last_leaf_climax')
-                        else if (st === 'painting_golden_leaf') setFocusMode('golden_comeback')
-                        else if (st === 'typing') setFocusMode('locked_in')
-                        else setFocusMode('distracted')
-                      }}
-                      className={`rounded-lg border px-2 py-1.5 text-left text-[10px] font-semibold transition ${
-                        roommateState === st
-                          ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200'
-                          : 'border-stone-800 bg-stone-950 text-stone-400 hover:text-stone-200'
-                      }`}
-                    >
-                      {st}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex items-center justify-between border-t border-stone-800 pt-2">
-                  <button
-                    onClick={handleSweepFloor}
-                    className="rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10.5px] text-stone-200 hover:bg-stone-700"
-                  >
-                    Sweep Floor ({fallenLeavesCount})
-                  </button>
-                  <button
-                    onClick={handleResetSession}
-                    className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10.5px] text-stone-200 hover:bg-stone-700"
-                  >
-                    <RotateCcw className="h-3 w-3" /> Reset Studio
-                  </button>
-                </div>
               </div>
             )}
 
@@ -1149,57 +1316,126 @@ export function App() {
                 ))}
               </div>
             )}
+
+            {activePanel === 'demo' && (
+              <div className="space-y-3 font-mono text-xs">
+                <p className="text-[10.5px] text-stone-400">
+                  Preview any of the 4 dramatic acts or 6 roommate animations immediately:
+                </p>
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    onClick={handleLockInAndSprout}
+                    className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/50 p-2 font-bold text-emerald-300 hover:bg-emerald-900/60"
+                  >
+                    <Sun className="h-3.5 w-3.5" /> 1. Sprout Leaf
+                  </button>
+                  <button
+                    onClick={() =>
+                      triggerDistraction('Simulated Unapproved Tab Outside Whitelist')
+                    }
+                    className="flex items-center gap-1.5 rounded-lg border border-orange-500/40 bg-orange-950/50 p-2 font-bold text-orange-300 hover:bg-orange-900/60"
+                  >
+                    <ThermometerSnowflake className="h-3.5 w-3.5" /> 2. Drop Leaf
+                  </button>
+                  <button
+                    onClick={handleTriggerLastLeafClimax}
+                    className="flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-950/50 p-2 font-bold text-rose-300 hover:bg-rose-900/60"
+                  >
+                    <ShieldAlert className="h-3.5 w-3.5" /> 3. Last Leaf Storm
+                  </button>
+                  <button
+                    onClick={handleTriggerGoldenLeafTwist}
+                    className="flex items-center gap-1.5 rounded-lg border border-yellow-500/40 bg-yellow-950/50 p-2 font-bold text-yellow-300 hover:bg-yellow-900/60"
+                  >
+                    <Sparkles className="h-3.5 w-3.5" /> 4. Golden Leaf Twist
+                  </button>
+                </div>
+
+                <div className="border-t border-stone-800 pt-2">
+                  <span className="block text-[10px] text-stone-400 mb-1.5">
+                    6 Character States:
+                  </span>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {(
+                      [
+                        'typing',
+                        'glaring_with_clipboard',
+                        'sweeping_leaves',
+                        'shivering',
+                        'dramatic_sickbed',
+                        'painting_golden_leaf',
+                      ] as RoommateState[]
+                    ).map((st) => (
+                      <button
+                        key={st}
+                        onClick={() => {
+                          soundFX.playSoftClick()
+                          setRoommateState(st)
+                          setDialogueText(pickRandomDialogue(st))
+                          if (st === 'dramatic_sickbed') setFocusMode('last_leaf_climax')
+                          else if (st === 'painting_golden_leaf') setFocusMode('golden_comeback')
+                          else if (st === 'typing') setFocusMode('locked_in')
+                          else setFocusMode('distracted')
+                        }}
+                        className={`rounded-lg border px-2 py-1 text-left text-[10px] font-semibold transition ${
+                          roommateState === st
+                            ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200'
+                            : 'border-stone-800 bg-stone-950 text-stone-400 hover:text-stone-200'
+                        }`}
+                      >
+                        {st}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between border-t border-stone-800 pt-2">
+                  <button
+                    onClick={handleSweepFloor}
+                    className="rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10.5px] text-stone-200 hover:bg-stone-700"
+                  >
+                    Sweep Floor ({fallenLeavesCount})
+                  </button>
+                  <button
+                    onClick={handleResetSession}
+                    className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800 px-2.5 py-1 text-[10.5px] text-stone-200 hover:bg-stone-700"
+                  >
+                    <RotateCcw className="h-3 w-3" /> Reset Studio
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         )}
       </main>
 
-      {/* 4. COMPACT BOTTOM QUICK-ACTION DOCK */}
-      <footer className="flex h-12 shrink-0 items-center justify-between gap-2 border-t border-stone-800 bg-stone-950 px-3 overflow-x-auto">
-        <div className="flex items-center gap-1.5 shrink-0">
-          <button
-            onClick={handleLockInAndSprout}
-            className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-emerald-300 hover:bg-emerald-900/60"
-          >
-            <Sun className="h-3.5 w-3.5" />
-            <span>1. Sprout Leaf Now</span>
-          </button>
-
-          <button
-            onClick={() =>
-              triggerDistraction('Opened an unapproved tab outside your initial whitelist')
-            }
-            className="flex items-center gap-1.5 rounded-lg border border-orange-500/40 bg-orange-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-orange-300 hover:bg-orange-900/60"
-          >
-            <ThermometerSnowflake className="h-3.5 w-3.5" />
-            <span>2. Unapproved Tab</span>
-          </button>
-
-          <button
-            onClick={handlePhoneDetected}
-            className="flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-rose-300 hover:bg-rose-900/60"
-          >
-            <Smartphone className="h-3.5 w-3.5" />
-            <span>Sim Phone</span>
-          </button>
-
-          <button
-            onClick={handleTriggerLastLeafClimax}
-            className="flex items-center gap-1.5 rounded-lg border border-purple-500/40 bg-purple-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-purple-300 hover:bg-purple-900/60"
-          >
-            <ShieldAlert className="h-3.5 w-3.5" />
-            <span>3. Last Leaf Climax</span>
-          </button>
-
-          <button
-            onClick={handleTriggerGoldenLeafTwist}
-            className="flex items-center gap-1.5 rounded-lg border border-yellow-500/40 bg-yellow-950/50 px-2.5 py-1 font-mono text-[11px] font-bold text-yellow-300 hover:bg-yellow-900/60"
-          >
-            <Sparkles className="h-3.5 w-3.5" />
-            <span>4. O. Henry Twist</span>
-          </button>
+      {/* 4. SIMPLE, SELF-EXPLANATORY FOOTER STATUS BAR */}
+      <footer className="flex h-11 shrink-0 items-center justify-between gap-3 border-t border-stone-800/80 bg-stone-950 px-4 font-mono text-xs">
+        <div className="flex items-center gap-3 min-w-0 truncate">
+          <span className="flex items-center gap-1.5 text-emerald-400 font-bold shrink-0">
+            <Leaf className="h-3.5 w-3.5" />
+            {attachedLeavesCount}/14 Leaves
+          </span>
+          <span className="text-stone-600">·</span>
+          <span className="truncate text-[11px] text-stone-400">
+            {pomodoro.enabled
+              ? `Synced to ${pomodoro.focusMinutes}m Pomodoro (1 leaf every ${Math.floor(
+                  targetSecondsPerLeaf / 60
+                )}m ${targetSecondsPerLeaf % 60}s)`
+              : 'Free Focus Mode (1 leaf every 3m 00s)'}
+          </span>
         </div>
 
         <div className="flex items-center gap-2 shrink-0">
+          {fallenLeavesCount > 0 && (
+            <button
+              onClick={handleSweepFloor}
+              className="rounded-lg border border-amber-500/30 bg-amber-950/40 px-2.5 py-1 text-[11px] font-semibold text-amber-300 hover:bg-amber-900/50"
+            >
+              🧹 Sweep {fallenLeavesCount} Fallen
+            </button>
+          )}
+
           <button
             onClick={() =>
               setStats((s) => ({
@@ -1207,14 +1443,27 @@ export function App() {
                 speedMultiplier: s.speedMultiplier === 1 ? 15 : 1,
               }))
             }
-            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-mono text-[11px] font-bold transition ${
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-bold transition ${
               stats.speedMultiplier > 1
                 ? 'border-amber-500/50 bg-amber-500/20 text-amber-300'
                 : 'border-stone-800 bg-stone-900 text-stone-400 hover:text-stone-200'
             }`}
+            title="Fast-forward timer 15x to preview leaf growth & upgrades"
           >
             <FastForward className="h-3 w-3" />
-            <span>{stats.speedMultiplier}x Speed</span>
+            <span>{stats.speedMultiplier}x Pace</span>
+          </button>
+
+          <button
+            onClick={() => togglePanel('demo')}
+            className={`flex items-center gap-1.5 rounded-lg border px-3 py-1 text-[11px] font-bold transition ${
+              activePanel === 'demo'
+                ? 'border-purple-500 bg-purple-500/20 text-purple-200'
+                : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
+            }`}
+          >
+            <Wand2 className="h-3.5 w-3.5 text-purple-400" />
+            <span>Test Story Moments</span>
           </button>
         </div>
       </footer>
