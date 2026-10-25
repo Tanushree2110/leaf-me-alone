@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef } from 'react'
 import { CameraOff, RefreshCw } from 'lucide-react'
+import { FaceDetector, FilesetResolver } from '@mediapipe/tasks-vision'
 import { CameraStatus } from '../types'
 
 interface WebcamGuardProps {
@@ -10,10 +11,6 @@ interface WebcamGuardProps {
   onPhoneDetected: () => void
   onAwayDetected: () => void
   onBackFocused: () => void
-}
-
-interface DetectedFace {
-  boundingBox: DOMRectReadOnly
 }
 
 export const WebcamGuard: React.FC<WebcamGuardProps> = ({
@@ -27,9 +24,10 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const faceDetectorRef = useRef<{
-    detect: (v: HTMLVideoElement) => Promise<DetectedFace[]>
-  } | null>(null)
+  const mpDetectorRef = useRef<FaceDetector | null>(null)
+  const mpReadyRef = useRef<boolean>(false)
+  const prevFrameRef = useRef<Float32Array | null>(null)
+  const lastMotionMsRef = useRef<number>(Date.now())
 
   const callbacksRef = useRef({
     status,
@@ -49,21 +47,38 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   const missingStartMsRef = useRef<number | null>(null)
   const lastAlertTimeRef = useRef<number>(0)
 
-  // Try initializing native Chrome FaceDetector if available
+  // Initialize MediaPipe Neural FaceDetector (detects real human faces only, never walls/furniture!)
   useEffect(() => {
-    try {
-      const Win = window as unknown as {
-        FaceDetector?: new (opts?: { fastMode?: boolean; maxDetectedFaces?: number }) => {
-          detect: (v: HTMLVideoElement) => Promise<DetectedFace[]>
-        }
-      }
-      if (Win.FaceDetector) {
-        faceDetectorRef.current = new Win.FaceDetector({
-          fastMode: true,
-          maxDetectedFaces: 1,
+    let cancelled = false
+    async function initMediaPipe() {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        )
+        if (cancelled) return
+        const detector = await FaceDetector.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath:
+              'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
+          },
+          runningMode: 'VIDEO',
+          minDetectionConfidence: 0.55,
         })
+        if (!cancelled) {
+          mpDetectorRef.current = detector
+          mpReadyRef.current = true
+        }
+      } catch {
+        mpReadyRef.current = false
       }
-    } catch {}
+    }
+    initMediaPipe()
+    return () => {
+      cancelled = true
+      try {
+        mpDetectorRef.current?.close()
+      } catch {}
+    }
   }, [])
 
   const stopCamera = useCallback(() => {
@@ -109,15 +124,13 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [enabled, startCamera, stopCamera])
 
-  // Pure Face Presence Loop:
-  // Face visible in camera -> GREEN!
-  // Face disappears from camera -> RED immediately & drops leaf!
+  // Real-time Face Presence Detection Loop
   useEffect(() => {
     if (!enabled) return
 
     let isDetecting = false
 
-    const interval = setInterval(async () => {
+    const interval = setInterval(() => {
       if (isDetecting) return
       const video = videoRef.current
       const overlay = overlayCanvasRef.current
@@ -135,37 +148,37 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       if (video.paused && video.readyState >= 2) {
         video.play().catch(() => {})
       }
-      if (video.readyState < 2) return
+      if (video.readyState < 2 || video.videoWidth === 0) return
 
       isDetecting = true
       try {
         let faceVisible = false
-        let faceCenterX = 0.5
-        let faceCenterY = 0.5
-        let faceBoxW = 0.35
-        let faceBoxH = 0.45
+        let boxX = 0.3
+        let boxY = 0.25
+        let boxW = 0.4
+        let boxH = 0.5
 
-        // 1. Native Chrome FaceDetector if supported
-        if (faceDetectorRef.current) {
+        // 1. Primary: MediaPipe BlazeFace Neural Detector (100% immune to warm walls or empty chairs!)
+        if (mpReadyRef.current && mpDetectorRef.current) {
           try {
-            const faces = await faceDetectorRef.current.detect(video)
-            if (faces && faces.length > 0) {
-              const b = faces[0].boundingBox
+            const result = mpDetectorRef.current.detectForVideo(video, performance.now())
+            if (result && result.detections && result.detections.length > 0) {
+              const det = result.detections[0]
+              const bb = det.boundingBox
               const vw = video.videoWidth || 320
               const vh = video.videoHeight || 240
-              faceVisible = true
-              faceCenterX = (b.x + b.width * 0.5) / vw
-              faceCenterY = (b.y + b.height * 0.5) / vh
-              faceBoxW = b.width / vw
-              faceBoxH = b.height / vh
+              if (bb && bb.width > 24 && bb.height > 24) {
+                faceVisible = true
+                boxX = bb.originX / vw
+                boxY = bb.originY / vh
+                boxW = bb.width / vw
+                boxH = bb.height / vh
+              }
             }
-          } catch {
-            faceDetectorRef.current = null
-          }
-        }
-
-        // 2. Fallback: Skin + Facial Feature Contrast Detector on 64x48 frame
-        if (!faceDetectorRef.current) {
+          } catch {}
+        } else {
+          // 2. Fallback while MediaPipe model loads: requires BOTH central face geometry AND live micro-movement
+          // An empty background wall has 0 live movement, so leaving the screen immediately registers as away!
           if (!analysisCanvasRef.current) {
             const c = document.createElement('canvas')
             c.width = 64
@@ -177,57 +190,58 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           if (actx) {
             actx.drawImage(video, 0, 0, 64, 48)
             const frame = actx.getImageData(0, 0, 64, 48).data
+            const gray = new Float32Array(64 * 48)
 
-            let skinPixels = 0
-            let featureEdges = 0
-            let sumX = 0
-            let sumY = 0
+            let motionCount = 0
+            let centerSkin = 0
+            let outerSkin = 0
+            const prev = prevFrameRef.current
 
             for (let y = 4; y < 44; y++) {
-              for (let x = 10; x < 54; x++) {
-                const i = (y * 64 + x) * 4
-                const r = frame[i]
-                const g = frame[i + 1]
-                const b = frame[i + 2]
+              for (let x = 4; x < 60; x++) {
+                const idx = y * 64 + x
+                const p = idx * 4
+                const r = frame[p]
+                const g = frame[p + 1]
+                const b = frame[p + 2]
+                const lum = 0.299 * r + 0.587 * g + 0.114 * b
+                gray[idx] = lum
 
-                const maxC = Math.max(r, g, b)
-                const minC = Math.min(r, g, b)
+                if (prev && Math.abs(lum - prev[idx]) > 6.5) {
+                  motionCount++
+                }
 
-                // Human skin tone check (rejects walls, ceilings, dark rooms, covered camera)
                 const isSkin =
-                  r > 72 &&
-                  g > 38 &&
-                  b > 20 &&
-                  r < 248 &&
-                  r > g &&
-                  g > b * 0.82 &&
-                  r - g >= 9 &&
-                  r - b >= 16 &&
-                  maxC - minC >= 16
+                  r > 80 &&
+                  g > 45 &&
+                  b > 25 &&
+                  r > g + 12 &&
+                  r > b + 22 &&
+                  g > b
 
                 if (isSkin) {
-                  skinPixels++
-                  sumX += x / 64
-                  sumY += y / 48
-
-                  // Check if there is facial detail (eyes, eyebrows, glasses, nose/mouth shadow) nearby
-                  const upI = ((y - 2) * 64 + x) * 4
-                  const diff =
-                    Math.abs(r - frame[upI]) +
-                    Math.abs(g - frame[upI + 1]) +
-                    Math.abs(b - frame[upI + 2])
-                  if (diff > 42) {
-                    featureEdges++
+                  if (x >= 18 && x <= 46 && y >= 8 && y <= 38) {
+                    centerSkin++
+                  } else {
+                    outerSkin++
                   }
                 }
               }
             }
 
-            // Require both a contiguous cluster of face skin pixels AND facial feature contrast
-            if (skinPixels >= 36 && featureEdges >= 5) {
+            prevFrameRef.current = gray
+            const nowMs = Date.now()
+            if (motionCount >= 5) {
+              lastMotionMsRef.current = nowMs
+            }
+
+            // A real person sitting at the desk has concentrated skin in the center (not covering the whole wall)
+            // AND has micro-movements within the last 2.2 seconds
+            const hasRecentPresenceMotion = nowMs - lastMotionMsRef.current < 2200
+            const isLocalizedFace = centerSkin >= 45 && centerSkin > outerSkin * 0.75
+
+            if (isLocalizedFace && hasRecentPresenceMotion) {
               faceVisible = true
-              faceCenterX = sumX / skinPixels
-              faceCenterY = sumY / skinPixels
             }
           }
         }
@@ -241,19 +255,19 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         } = callbacksRef.current
 
         if (!faceVisible) {
-          // Face disappeared from camera! Turn RED after a brief 0.4s debounce
+          // Face disappeared from camera -> Turn RED immediately (0.3s)!
           if (!missingStartMsRef.current) missingStartMsRef.current = now
           const elapsed = (now - missingStartMsRef.current) / 1000
 
-          if (elapsed >= 0.4) {
+          if (elapsed >= 0.3) {
             if (curStatus !== 'away_detected') cbStatus('away_detected')
-            if (now - lastAlertTimeRef.current > 3200) {
+            if (now - lastAlertTimeRef.current > 3000) {
               lastAlertTimeRef.current = now
               cbAway()
             }
           }
         } else {
-          // Face is visible on camera -> GREEN!
+          // Face is visible -> GREEN!
           missingStartMsRef.current = null
           if (curStatus !== 'focused') {
             cbStatus('focused')
@@ -261,7 +275,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           }
         }
 
-        // Draw clean Green (Face Visible) or Red (Face Disappeared) box on overlay
+        // Draw Green face box when visible, or bright Red frame when face disappears
         if (overlay) {
           const octx = overlay.getContext('2d')
           if (octx) {
@@ -270,25 +284,29 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             octx.clearRect(0, 0, W, H)
 
             if (faceVisible) {
-              const rx = (1 - faceCenterX) * W
-              const ry = faceCenterY * H
-              const bw = Math.max(32, faceBoxW * W)
-              const bh = Math.max(36, faceBoxH * H)
+              // Mirrored X coordinate
+              const mirroredX = (1 - (boxX + boxW)) * W
+              const ry = boxY * H
+              const rw = boxW * W
+              const rh = boxH * H
 
               octx.strokeStyle = '#10b981'
-              octx.lineWidth = 2.2
-              octx.strokeRect(rx - bw / 2, ry - bh / 2, bw, bh)
+              octx.lineWidth = 2.5
+              octx.strokeRect(mirroredX, ry, rw, rh)
             } else {
-              // Red wash when face disappears
-              octx.fillStyle = 'rgba(244, 63, 94, 0.28)'
+              // Bright Red overlay when face is not on screen
+              octx.fillStyle = 'rgba(244, 63, 94, 0.42)'
               octx.fillRect(0, 0, W, H)
+              octx.strokeStyle = '#f43f5e'
+              octx.lineWidth = 4
+              octx.strokeRect(2, 2, W - 4, H - 4)
             }
           }
         }
       } finally {
         isDetecting = false
       }
-    }, 150)
+    }, 140)
 
     return () => clearInterval(interval)
   }, [enabled, startCamera])
@@ -297,25 +315,24 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
 
   return (
     <div
-      className={`flex items-center gap-1.5 rounded-2xl border p-1.5 shadow-2xl backdrop-blur-md transition-colors ${
+      className={`flex items-center gap-1.5 rounded-2xl border-2 p-1.5 shadow-2xl backdrop-blur-md transition-all ${
         isRedState
-          ? 'border-rose-500 bg-rose-950/90 ring-2 ring-rose-500/50'
-          : 'border-emerald-500/60 bg-stone-900/95'
+          ? 'border-rose-500 bg-rose-950/95 ring-4 ring-rose-500/50'
+          : 'border-emerald-500/80 bg-stone-900/95'
       }`}
     >
-      {/* Live Camera Viewport: Green when Face Visible, Red when Face Disappears */}
       <div
         className={`relative h-20 w-28 overflow-hidden rounded-xl border-2 bg-stone-950 shrink-0 transition-colors ${
           isRedState ? 'border-rose-500' : 'border-emerald-500'
         }`}
       >
         <span
-          className={`absolute top-1.5 left-1.5 z-10 h-2.5 w-2.5 rounded-full shadow ${
+          className={`absolute top-1.5 left-1.5 z-10 h-3 w-3 rounded-full shadow ${
             isRedState ? 'bg-rose-500 animate-ping' : 'bg-emerald-400'
           }`}
         />
         <span
-          className={`absolute top-1.5 left-1.5 z-10 h-2.5 w-2.5 rounded-full ${
+          className={`absolute top-1.5 left-1.5 z-10 h-3 w-3 rounded-full ${
             isRedState ? 'bg-rose-500' : 'bg-emerald-400'
           }`}
         />

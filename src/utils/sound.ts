@@ -1,4 +1,4 @@
-// Soothing Web Audio Engine with Cross-Tab Mute Sync (BroadcastChannel) & Zero Overlap
+// Soothing Web Audio Engine with Server-Wide Mute Sync & Cursor Webview Silence
 
 export type AudioMood = 'studying' | 'storm' | 'silent'
 
@@ -14,6 +14,12 @@ declare global {
   }
 }
 
+function isHiddenCursorWebview(): boolean {
+  if (typeof navigator === 'undefined') return false
+  // Cursor's internal preview webview runs inside Electron; never play background audio there!
+  return /Electron|Cursor/i.test(navigator.userAgent)
+}
+
 function getRegistry(): GlobalAudioRegistry {
   if (typeof window === 'undefined') {
     return { contexts: new Set(), timers: new Set(), nodes: new Set() }
@@ -24,9 +30,6 @@ function getRegistry(): GlobalAudioRegistry {
       timers: new Set(),
       nodes: new Set(),
     }
-  }
-  if (!window.__leafAudioRegistry.nodes) {
-    window.__leafAudioRegistry.nodes = new Set()
   }
   return window.__leafAudioRegistry
 }
@@ -56,7 +59,6 @@ export function nukeAllActiveAudio() {
 // Immediately silence any leftover audio on module load
 nukeAllActiveAudio()
 
-// Warm, soothing pentatonic singing-bowl / ambient pad frequencies (C major pentatonic in warm middle register)
 const SOOTHING_CHORDS: number[][] = [
   [130.81, 196.0, 246.94, 293.66], // C3, G3, B3, D4
   [110.0, 164.81, 196.0, 261.63],  // A2, E3, G3, C4
@@ -75,13 +77,30 @@ class SoundEngine {
   private thunderTimer: ReturnType<typeof setInterval> | null = null
   private chordIndex = 0
   private channel: BroadcastChannel | null = null
+  private listeners: Set<(enabled: boolean) => void> = new Set()
 
   constructor() {
+    if (isHiddenCursorWebview()) {
+      this.enabled = false
+      nukeAllActiveAudio()
+      return
+    }
+
     if (typeof window !== 'undefined') {
       const saved = localStorage.getItem(STORAGE_MUTE_KEY)
       if (saved === 'false') {
         this.enabled = false
       }
+
+      // Check server-wide mute state on load
+      fetch('/api/audio-state')
+        .then((r) => r.json())
+        .then((d) => {
+          if (typeof d?.muted === 'boolean') {
+            this.applyEnabledInternal(!d.muted)
+          }
+        })
+        .catch(() => {})
 
       try {
         this.channel = new BroadcastChannel('leaf_me_alone_audio_sync')
@@ -91,11 +110,24 @@ class SoundEngine {
           }
         }
       } catch {}
+
+      if (import.meta.hot) {
+        import.meta.hot.on('leaf-audio-mute', (data: { muted?: boolean }) => {
+          if (typeof data?.muted === 'boolean') {
+            this.applyEnabledInternal(!data.muted)
+          }
+        })
+      }
     }
   }
 
+  public onEnabledChange(cb: (enabled: boolean) => void): () => void {
+    this.listeners.add(cb)
+    return () => this.listeners.delete(cb)
+  }
+
   private getContext(): { ctx: AudioContext; out: GainNode } | null {
-    if (!this.enabled) return null
+    if (!this.enabled || isHiddenCursorWebview()) return null
     if ((!this.ctx || this.ctx.state === 'closed') && typeof window !== 'undefined') {
       const AudioCtx =
         window.AudioContext ||
@@ -104,7 +136,7 @@ class SoundEngine {
         this.ctx = new AudioCtx()
         getRegistry().contexts.add(this.ctx)
         this.masterGain = this.ctx.createGain()
-        this.masterGain.gain.setValueAtTime(0.8, this.ctx.currentTime)
+        this.masterGain.gain.setValueAtTime(0.75, this.ctx.currentTime)
         this.masterGain.connect(this.ctx.destination)
       }
     }
@@ -116,10 +148,18 @@ class SoundEngine {
   }
 
   private applyEnabledInternal(val: boolean) {
+    if (isHiddenCursorWebview()) {
+      this.enabled = false
+      nukeAllActiveAudio()
+      return
+    }
+
     this.enabled = val
     try {
       localStorage.setItem(STORAGE_MUTE_KEY, String(val))
     } catch {}
+
+    this.listeners.forEach((cb) => cb(val))
 
     if (!val) {
       this.stopAllMoodAudio()
@@ -145,10 +185,14 @@ class SoundEngine {
 
   public setEnabled(val: boolean) {
     this.applyEnabledInternal(val)
-    // Also broadcast to any other open localhost:5173 tabs so they mute immediately too!
     try {
       this.channel?.postMessage({ type: 'SET_ENABLED', enabled: val })
     } catch {}
+    fetch('/api/audio-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ muted: !val }),
+    }).catch(() => {})
   }
 
   public isEnabled(): boolean {
@@ -182,7 +226,6 @@ class SoundEngine {
       getRegistry().timers.delete(this.thunderTimer)
       this.thunderTimer = null
     }
-    // Stop every currently playing oscillator/buffer so studying music and storm NEVER overlap!
     const reg = getRegistry()
     reg.nodes.forEach((n) => {
       try {
@@ -205,13 +248,12 @@ class SoundEngine {
 
   private applyMoodAudio(mood: AudioMood) {
     this.stopAllMoodAudio()
-    if (!this.enabled || mood === 'silent') return
+    if (!this.enabled || mood === 'silent' || isHiddenCursorWebview()) return
 
     const audio = this.getContext()
     if (!audio) return
 
     if (mood === 'studying') {
-      // Only play soothing warm sine pad (NO rain noise!)
       this.playSoothingPadChord()
       this.musicTimer = setInterval(() => {
         if (this.enabled && this.currentMood === 'studying') {
@@ -220,7 +262,6 @@ class SoundEngine {
       }, 4500)
       getRegistry().timers.add(this.musicTimer)
     } else if (mood === 'storm') {
-      // Stop soothing music completely and play thunder rumble
       this.playThunderCrack()
       this.thunderTimer = setInterval(() => {
         if (this.enabled && this.currentMood === 'storm') {
@@ -231,9 +272,8 @@ class SoundEngine {
     }
   }
 
-  // Pure, warm, soothing sine-wave ambient pad (slow 1.2s fade-in, gentle volume, zero harsh harmonics)
   private playSoothingPadChord() {
-    if (!this.enabled || this.currentMood !== 'studying') return
+    if (!this.enabled || this.currentMood !== 'studying' || isHiddenCursorWebview()) return
     const audio = this.getContext()
     if (!audio || audio.ctx.state !== 'running') return
     const { ctx, out } = audio
@@ -246,12 +286,11 @@ class SoundEngine {
       const osc = ctx.createOscillator()
       const gain = ctx.createGain()
 
-      // Pure sine wave for soothing singing-bowl / warm ambient pad tone
       osc.type = 'sine'
       osc.frequency.setValueAtTime(freq, now)
 
       gain.gain.setValueAtTime(0.0001, now)
-      gain.gain.linearRampToValueAtTime(0.018 / (1 + i * 0.25), now + 1.4)
+      gain.gain.linearRampToValueAtTime(0.016 / (1 + i * 0.25), now + 1.4)
       gain.gain.exponentialRampToValueAtTime(0.0001, now + 4.3)
 
       osc.connect(gain)
@@ -263,9 +302,8 @@ class SoundEngine {
     })
   }
 
-  // Deep low-pitched thunder rumble when not studying
   public playThunderCrack() {
-    if (!this.enabled) return
+    if (!this.enabled || isHiddenCursorWebview()) return
     const audio = this.getContext()
     if (!audio) return
     const { ctx, out } = audio
@@ -301,7 +339,7 @@ class SoundEngine {
   }
 
   public playLeafSprout() {
-    if (!this.enabled) return
+    if (!this.enabled || isHiddenCursorWebview()) return
     const audio = this.getContext()
     if (!audio) return
     const { ctx, out } = audio
@@ -328,17 +366,17 @@ class SoundEngine {
   }
 
   public playClipboardPenalty() {
-    if (!this.enabled) return
+    if (!this.enabled || isHiddenCursorWebview()) return
     this.playThunderCrack()
   }
 
   public playThunderClimax() {
-    if (!this.enabled) return
+    if (!this.enabled || isHiddenCursorWebview()) return
     this.playThunderCrack()
   }
 
   public playGoldenFanfare() {
-    if (!this.enabled) return
+    if (!this.enabled || isHiddenCursorWebview()) return
     const audio = this.getContext()
     if (!audio) return
     const { ctx, out } = audio
@@ -365,7 +403,7 @@ class SoundEngine {
   }
 
   public playPomodoroBell() {
-    if (!this.enabled) return
+    if (!this.enabled || isHiddenCursorWebview()) return
     const audio = this.getContext()
     if (!audio) return
     const { ctx, out } = audio
@@ -375,7 +413,7 @@ class SoundEngine {
     const gain = ctx.createGain()
 
     osc.type = 'sine'
-    osc.frequency.setValueAtTime(528.0, now) // 528Hz soothing chime
+    osc.frequency.setValueAtTime(528.0, now)
 
     gain.gain.setValueAtTime(0.0001, now)
     gain.gain.linearRampToValueAtTime(0.08, now + 0.03)
@@ -389,9 +427,7 @@ class SoundEngine {
     osc.stop(now + 1.55)
   }
 
-  public playSoftClick() {
-    // Silent UI click so clicking buttons never makes unwanted noise
-  }
+  public playSoftClick() {}
 }
 
 export const soundFX = new SoundEngine()

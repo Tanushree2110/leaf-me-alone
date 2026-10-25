@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Leaf Me Alone — Chrome Tab Sync",
-  "version": "1.1.0",
-  "description": "Automatically syncs your open Google Chrome tabs and sub-tab expansions with Leaf Me Alone.",
+  "name": "Leaf Me Alone — Strict Tab Guard",
+  "version": "1.2.0",
+  "description": "Blocks opening new tabs (Cmd+T / +) during focus; only allows tabs opened by clicking links on existing allowed tabs.",
   "permissions": ["tabs", "scripting"],
-  "host_permissions": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
   },
@@ -12,7 +12,12 @@
     {
       "matches": ["http://localhost:5173/*", "http://127.0.0.1:5173/*"],
       "js": ["content.js"],
-      "run_at": "document_idle"
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["link-tracker.js"],
+      "run_at": "document_start"
     }
   ]
 }

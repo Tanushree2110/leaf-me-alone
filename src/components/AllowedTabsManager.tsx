@@ -15,15 +15,16 @@ import { AllowedTab } from '../types'
 interface AllowedTabsManagerProps {
   allowedTabs: AllowedTab[]
   isWhitelistLocked: boolean
+  isPomodoroRunning: boolean
   activeAllowedTabId: string | null
   extensionConnected: boolean
   onRequestExtensionSync: () => void
   onLockWhitelist: () => void
   onUnlockWhitelistReset: () => void
-  onAddInitialTab: (title: string, url: string, openInChrome?: boolean) => void
+  onAddInitialTab: (title: string, url: string) => void
   onRemoveInitialTab: (id: string) => void
-  onExpandSubTab: (parentId: string, title: string, url: string) => void
-  onSwitchToAllowedTab: (tab: AllowedTab, openNewWindow?: boolean) => void
+  onOpenLinkFromExistingTab: (parentTab: AllowedTab, linkUrl: string) => void
+  onSwitchToAllowedTab: (tab: AllowedTab) => void
 }
 
 const EXTENSION_FOLDER_PATH =
@@ -32,6 +33,7 @@ const EXTENSION_FOLDER_PATH =
 export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
   allowedTabs,
   isWhitelistLocked,
+  isPomodoroRunning,
   activeAllowedTabId,
   extensionConnected,
   onRequestExtensionSync,
@@ -39,12 +41,10 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
   onUnlockWhitelistReset,
   onAddInitialTab,
   onRemoveInitialTab,
-  onExpandSubTab,
+  onOpenLinkFromExistingTab,
   onSwitchToAllowedTab,
 }) => {
   const [newTitle, setNewTitle] = useState('')
-  const [expandingParentId, setExpandingParentId] = useState<string | null>(null)
-  const [expandTitle, setExpandTitle] = useState('')
   const [copiedPath, setCopiedPath] = useState(false)
 
   const rootTabs = allowedTabs.filter((t) => !t.parentId)
@@ -64,24 +64,15 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
     if (trimmed.includes('.') && !trimmed.includes(' ')) {
       return { title: trimmed, url: `https://${trimmed}` }
     }
-    return { title: trimmed, url: '' }
+    return { title: trimmed, url: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}` }
   }
 
   const handleAddInitial = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!newTitle.trim()) return
+    if (isWhitelistLocked || isPomodoroRunning || !newTitle.trim()) return
     const { title, url } = parseInputToTitleAndUrl(newTitle)
-    onAddInitialTab(title, url, false)
+    onAddInitialTab(title, url)
     setNewTitle('')
-  }
-
-  const handleExpandSubmit = (e: React.FormEvent, parentId: string) => {
-    e.preventDefault()
-    if (!expandTitle.trim()) return
-    const { title, url } = parseInputToTitleAndUrl(expandTitle)
-    onExpandSubTab(parentId, title, url)
-    setExpandTitle('')
-    setExpandingParentId(null)
   }
 
   const handleCopyExtensionPath = () => {
@@ -89,6 +80,8 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
     setCopiedPath(true)
     setTimeout(() => setCopiedPath(false), 2500)
   }
+
+  const locked = isWhitelistLocked || isPomodoroRunning
 
   return (
     <div className="flex flex-col gap-2 text-xs font-mono">
@@ -103,10 +96,10 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
           }`}
         >
           <RefreshCw className="h-3 w-3 text-emerald-400" />
-          {extensionConnected ? 'Auto-Synced with Chrome' : 'Sync Chrome Tabs'}
+          {extensionConnected ? 'Strict Tab Blocker Active' : 'Sync Chrome Tabs'}
         </button>
 
-        {!isWhitelistLocked ? (
+        {!locked ? (
           <button
             onClick={onLockWhitelist}
             className="flex items-center gap-1 rounded-lg bg-emerald-600 px-2.5 py-1 text-[10px] font-bold text-white hover:bg-emerald-500"
@@ -116,13 +109,28 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
           </button>
         ) : (
           <button
-            onClick={onUnlockWhitelistReset}
-            className="flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-[10px] font-bold text-amber-300 hover:bg-amber-500/20"
+            disabled={isPomodoroRunning}
+            onClick={() => {
+              if (!isPomodoroRunning) onUnlockWhitelistReset()
+            }}
+            className={`flex items-center gap-1 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-[10px] font-bold text-amber-300 ${
+              isPomodoroRunning ? 'opacity-60 cursor-not-allowed' : 'hover:bg-amber-500/20'
+            }`}
+            title={
+              isPomodoroRunning
+                ? 'Stop Pomodoro session first to edit initial tabs'
+                : 'Click to edit initial tabs'
+            }
           >
-            <Unlock className="h-3 w-3" />
-            Locked (Edit)
+            {isPomodoroRunning ? <Lock className="h-3 w-3" /> : <Unlock className="h-3 w-3" />}
+            {isPomodoroRunning ? 'Locked (No New Tabs)' : 'Locked (Edit)'}
           </button>
         )}
+      </div>
+
+      {/* Strict Rule Notice */}
+      <div className="rounded-lg border border-rose-500/30 bg-rose-950/30 px-2.5 py-1.5 text-[10px] text-rose-200 leading-snug">
+        <strong>No New Tabs Allowed:</strong> Opening a new tab (`Cmd+T` / `+`) is blocked &amp; turns the studio <strong>RED</strong>. Only clicking a link from an existing tab below is allowed!
       </div>
 
       {/* 1-Click Chrome Extension Setup Banner if not yet connected */}
@@ -130,31 +138,29 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
         <div className="rounded-lg border border-sky-500/30 bg-sky-950/30 p-2 text-[10px] text-sky-200 leading-snug">
           <div className="flex items-center justify-between font-bold text-sky-300 mb-1">
             <span className="flex items-center gap-1">
-              <Puzzle className="h-3 w-3" /> Auto-Read All Chrome Tabs:
+              <Puzzle className="h-3 w-3" /> Auto-Close New Tabs in Chrome:
             </span>
             <button
               onClick={handleCopyExtensionPath}
               className="rounded bg-sky-600 px-2 py-0.5 text-[9.5px] font-bold text-white hover:bg-sky-500"
             >
-              {copiedPath ? '✓ Copied Folder Path!' : 'Copy Extension Folder'}
+              {copiedPath ? '✓ Copied Path!' : 'Copy Extension Folder'}
             </button>
           </div>
           <div className="text-[9.5px] text-stone-300">
-            1. Open <span className="text-sky-300 font-semibold">chrome://extensions</span> in Chrome
-            <br />
-            2. Enable <strong>Developer mode</strong> (top right) → <strong>Load unpacked</strong> → paste copied folder path!
+            Load/Reload in <strong>chrome://extensions</strong> → <strong>Load unpacked</strong> so Chrome physically closes any `Cmd+T` new tab!
           </div>
         </div>
       )}
 
-      {/* Add Initial Chrome Tab Input (Only when unlocked) */}
-      {!isWhitelistLocked && (
+      {/* Add Initial Chrome Tab Input (Only when stopped & unlocked) */}
+      {!locked && (
         <form onSubmit={handleAddInitial} className="flex gap-1.5">
           <input
             type="text"
             value={newTitle}
             onChange={(e) => setNewTitle(e.target.value)}
-            placeholder="Or type tab name / URL..."
+            placeholder="Add initial tab URL (e.g. github.com)..."
             className="flex-1 rounded-lg border border-stone-700 bg-stone-950 px-2.5 py-1.5 text-[11px] text-stone-100 focus:border-emerald-500 focus:outline-none"
           />
           <button
@@ -166,7 +172,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
         </form>
       )}
 
-      {/* Clean Tab List */}
+      {/* Existing Allowed Tabs + Clickable Links */}
       <div className="max-h-48 space-y-1.5 overflow-y-auto pr-0.5">
         {rootTabs.map((tab) => {
           const children = getChildren(tab.id)
@@ -179,7 +185,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
             >
               <div className="flex items-center justify-between gap-1.5">
                 <button
-                  onClick={() => onSwitchToAllowedTab(tab, false)}
+                  onClick={() => onSwitchToAllowedTab(tab)}
                   className={`flex items-center gap-1.5 truncate rounded px-1.5 py-0.5 text-[11px] font-bold transition ${
                     isSelected
                       ? 'text-emerald-300'
@@ -192,24 +198,22 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
 
                 <div className="flex items-center gap-1 shrink-0">
                   {tab.url && tab.url.startsWith('http') && (
-                    <button
-                      onClick={() => onSwitchToAllowedTab(tab, true)}
-                      className="rounded p-1 text-stone-500 hover:bg-stone-800 hover:text-stone-200"
-                      title={`Open ${tab.url} in Chrome`}
+                    <a
+                      href={tab.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={(e) => {
+                        e.preventDefault()
+                        onOpenLinkFromExistingTab(tab, tab.url)
+                      }}
+                      className="flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-950/40 px-1.5 py-0.5 text-[9.5px] font-semibold text-emerald-300 hover:bg-emerald-900/50"
+                      title="Open link from this existing tab (Allowed)"
                     >
-                      <ExternalLink className="h-3 w-3" />
-                    </button>
+                      <ExternalLink className="h-2.5 w-2.5" />
+                      Open Link
+                    </a>
                   )}
-                  <button
-                    onClick={() =>
-                      setExpandingParentId(expandingParentId === tab.id ? null : tab.id)
-                    }
-                    className="flex items-center gap-0.5 rounded border border-teal-500/30 bg-teal-950/40 px-1.5 py-0.5 text-[9.5px] font-semibold text-teal-300 hover:bg-teal-900/50"
-                  >
-                    <GitBranch className="h-2.5 w-2.5" />
-                    Sub-tab
-                  </button>
-                  {!isWhitelistLocked && rootTabs.length > 1 && (
+                  {!locked && rootTabs.length > 1 && (
                     <button
                       onClick={() => onRemoveInitialTab(tab.id)}
                       className="rounded p-1 text-stone-500 hover:text-rose-400"
@@ -220,34 +224,12 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
                 </div>
               </div>
 
-              {expandingParentId === tab.id && (
-                <form
-                  onSubmit={(e) => handleExpandSubmit(e, tab.id)}
-                  className="mt-1.5 flex items-center gap-1 border-t border-stone-800 pt-1.5"
-                >
-                  <input
-                    type="text"
-                    value={expandTitle}
-                    onChange={(e) => setExpandTitle(e.target.value)}
-                    placeholder={`Sub-tab from ${tab.title}...`}
-                    className="flex-1 rounded border border-stone-700 bg-stone-900 px-2 py-0.5 text-[10px] text-stone-100 focus:outline-none"
-                    autoFocus
-                  />
-                  <button
-                    type="submit"
-                    className="rounded bg-teal-600 px-2 py-0.5 text-[10px] font-bold text-white"
-                  >
-                    Add
-                  </button>
-                </form>
-              )}
-
               {children.length > 0 && (
                 <div className="mt-1 ml-3 space-y-1 border-l border-stone-800 pl-2">
                   {children.map((child) => (
                     <div
                       key={child.id}
-                      onClick={() => onSwitchToAllowedTab(child, false)}
+                      onClick={() => onSwitchToAllowedTab(child)}
                       className="flex cursor-pointer items-center gap-1.5 text-[10px] text-teal-300 hover:underline"
                     >
                       <GitBranch className="h-2.5 w-2.5 shrink-0" />
