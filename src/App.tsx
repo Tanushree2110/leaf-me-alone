@@ -1106,6 +1106,7 @@ export function App() {
             roomTempCelsius={stats.roomTempCelsius}
             comebackProgress={comebackProgress}
             dialogueText={dialogueText}
+            ambientRainOn={ambientRainOn}
             canvasRef={studioCanvasRef}
           />
         </div>

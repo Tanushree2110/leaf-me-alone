@@ -15,6 +15,7 @@ interface StudioCanvasProps {
   roomTempCelsius: number
   comebackProgress: number // 0 to 1
   dialogueText: string
+  ambientRainOn?: boolean
   canvasRef: React.RefObject<HTMLCanvasElement>
 }
 
@@ -73,6 +74,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         roomTempCelsius,
         comebackProgress,
         dialogueText,
+        ambientRainOn,
       } = latestPropsRef.current
 
       const t = (now - startTime) * 0.001
@@ -157,6 +159,10 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         skyGrad.addColorStop(0, '#334155')
         skyGrad.addColorStop(0.6, '#475569')
         skyGrad.addColorStop(1, '#64748b')
+      } else if (ambientRainOn) {
+        skyGrad.addColorStop(0, '#1e293b')
+        skyGrad.addColorStop(0.6, '#334155')
+        skyGrad.addColorStop(1, '#475569')
       } else {
         skyGrad.addColorStop(0, '#0284c7')
         skyGrad.addColorStop(0.55, '#7dd3fc')
@@ -242,21 +248,26 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
 
       // 4. WEATHER SHADERS OUTSIDE WINDOW (Rain, Thunderstorm Lightning, Frost)
       if (
+        ambientRainOn ||
         focusMode === 'last_leaf_climax' ||
         focusMode === 'distracted' ||
         hasUpgrade('string_lights')
       ) {
         const isStorm = focusMode === 'last_leaf_climax'
-        const isLoFiRain = focusMode === 'locked_in' && hasUpgrade('string_lights')
+        const isLoFiRain =
+          Boolean(ambientRainOn) ||
+          (focusMode === 'locked_in' && hasUpgrade('string_lights'))
 
         if (isStorm || isLoFiRain || focusMode === 'distracted') {
           ctx.strokeStyle = isStorm
-            ? 'rgba(186, 230, 253, 0.55)'
-            : 'rgba(148, 163, 184, 0.28)'
-          ctx.lineWidth = isStorm ? 1.6 : 1
-          const windSlant = isStorm ? -6 : -2
+            ? 'rgba(186, 230, 253, 0.7)'
+            : ambientRainOn
+            ? 'rgba(224, 242, 254, 0.75)'
+            : 'rgba(148, 163, 184, 0.35)'
+          ctx.lineWidth = isStorm || ambientRainOn ? 1.8 : 1.2
+          const windSlant = isStorm ? -6 : -3
           for (const drop of rainRef.current) {
-            drop.y += drop.speed * (isStorm ? 1.5 : 0.7)
+            drop.y += drop.speed * (isStorm ? 1.5 : ambientRainOn ? 1.15 : 0.7)
             drop.x += windSlant * 0.3
             if (drop.y > winY + winH) {
               drop.y = winY - 10

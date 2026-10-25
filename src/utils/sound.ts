@@ -256,7 +256,7 @@ class SoundEngine {
     filter.frequency.setValueAtTime(950, ctx.currentTime)
 
     const gain = ctx.createGain()
-    gain.gain.setValueAtTime(0.18, ctx.currentTime)
+    gain.gain.setValueAtTime(0.45, ctx.currentTime)
 
     whiteNoise.connect(filter)
     filter.connect(gain)
