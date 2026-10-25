@@ -253,13 +253,13 @@ export function App() {
     focusMode === 'distracted' ||
     focusMode === 'last_leaf_climax'
 
-  // Sync Background Music (Soothing Pad when Studying vs Thunder Storm when RED)
+  // Sync Background Music (Soothing Pad whenever GREEN & Sound On vs Thunder Storm when RED)
   useEffect(() => {
     if (!soundEnabled) {
       soundFX.setMood('silent')
       return
     }
-    if (pomodoro.enabled && (!pomodoro.isRunning || pomodoro.phase === 'awaiting_next_session')) {
+    if (pomodoro.enabled && pomodoro.phase === 'awaiting_next_session') {
       soundFX.setMood('silent')
       return
     }
@@ -268,7 +268,7 @@ export function App() {
     } else {
       soundFX.setMood('studying')
     }
-  }, [soundEnabled, isRoughWeather, pomodoro.enabled, pomodoro.isRunning, pomodoro.phase])
+  }, [soundEnabled, isRoughWeather, pomodoro.enabled, pomodoro.phase])
 
   const togglePanel = (panel: ExpandablePanel) => {
     setActivePanel((prev) => (prev === panel ? null : panel))
@@ -427,8 +427,18 @@ export function App() {
     [vineSegments, pomodoro.enabled, pomodoro.phase, recordViolationInCurrentSession]
   )
 
-  // Listen to Chrome Extension postMessage events (Strict New-Tab Blocker)
+  // Listen to Chrome Extension postMessage events + Vite WebSocket /api/new-tab-blocked bridge
   useEffect(() => {
+    let lastHandledBlockCount = 0
+
+    const handleBlockedTabEvent = (reason?: string) => {
+      if (Date.now() - lastDistractionMsRef.current < 800) return
+      triggerDistraction(
+        reason || 'Blocked opening a standalone New Tab (+ / Cmd+T)',
+        'blocked_new_tab'
+      )
+    }
+
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== window || !event.data) return
       const data = event.data
@@ -445,11 +455,20 @@ export function App() {
       }
 
       if (data.type === 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED') {
-        triggerDistraction(
-          data.reason || 'Blocked opening a standalone New Tab (+ / Cmd+T)',
-          'blocked_new_tab'
-        )
+        handleBlockedTabEvent(data.reason)
       }
+    }
+
+    if (import.meta.hot) {
+      import.meta.hot.on(
+        'leaf-new-tab-blocked',
+        (data: { count?: number; reason?: string }) => {
+          if (data?.count && data.count > lastHandledBlockCount) {
+            lastHandledBlockCount = data.count
+            handleBlockedTabEvent(data.reason)
+          }
+        }
+      )
     }
 
     window.addEventListener('message', handleMessage)
@@ -483,7 +502,7 @@ export function App() {
 
   const handlePhoneDetected = useCallback(() => {
     triggerDistraction(
-      'Face disappeared from camera for >3s',
+      'Face outside of camera screen',
       'face_away',
       PHONE_DETECTED_QUOTES
     )
@@ -491,7 +510,7 @@ export function App() {
 
   const handleAwayDetected = useCallback(() => {
     triggerDistraction(
-      'Face disappeared from camera for >3s',
+      'Face outside of camera screen',
       'face_away',
       AWAY_DETECTED_QUOTES
     )

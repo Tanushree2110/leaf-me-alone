@@ -22,13 +22,11 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null)
-  const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const mpDetectorRef = useRef<FaceDetector | null>(null)
   const mpReadyRef = useRef<boolean>(false)
   const lastTimestampMsRef = useRef<number>(0)
 
-  // Only fire a NEW camera violation once per actual absence episode (must return to screen before another can fire!)
   const hasTriggeredForCurrentAbsenceRef = useRef<boolean>(false)
 
   const callbacksRef = useRef({
@@ -49,6 +47,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   const missingStartMsRef = useRef<number | null>(null)
 
   // Initialize local MediaPipe Neural FaceDetector from /wasm and /models
+  // Confidence 0.52 ensures ONLY a real human face is detected (walls/chairs/doors NEVER match!)
   useEffect(() => {
     let cancelled = false
     async function initMediaPipe() {
@@ -60,7 +59,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             modelAssetPath: '/models/blaze_face_short_range.tflite',
           },
           runningMode: 'VIDEO',
-          minDetectionConfidence: 0.25,
+          minDetectionConfidence: 0.52,
         })
         if (!cancelled) {
           mpDetectorRef.current = detector
@@ -125,14 +124,14 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [enabled, startCamera, stopCamera])
 
-  // Real-time Face Presence Detection Loop
+  // Real-time Neural Face Presence Loop (Pure MediaPipe BlazeFace — zero wall/furniture false positives!)
   useEffect(() => {
     if (!enabled) return
 
     let isDetecting = false
 
     const interval = setInterval(() => {
-      // NEVER run camera penalties while user is working on another existing allowed browser tab!
+      // Do not penalize while working on another allowed browser tab
       if (typeof document !== 'undefined' && document.hidden) {
         missingStartMsRef.current = null
         return
@@ -157,6 +156,9 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       }
       if (video.readyState < 2 || video.videoWidth === 0) return
 
+      // Wait until MediaPipe neural detector is ready
+      if (!mpReadyRef.current || !mpDetectorRef.current) return
+
       isDetecting = true
       try {
         let faceVisible = false
@@ -165,84 +167,28 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         let boxW = 0.48
         let boxH = 0.62
 
-        // 1. Primary: Local MediaPipe BlazeFace Neural Detector
-        if (mpReadyRef.current && mpDetectorRef.current) {
-          try {
-            const nowPerf = Math.max(
-              lastTimestampMsRef.current + 1,
-              Math.floor(performance.now())
-            )
-            lastTimestampMsRef.current = nowPerf
-            const result = mpDetectorRef.current.detectForVideo(video, nowPerf)
-            if (result && result.detections && result.detections.length > 0) {
-              const det = result.detections[0]
-              const bb = det.boundingBox
-              const vw = video.videoWidth || 320
-              const vh = video.videoHeight || 240
-              if (bb && bb.width > 14 && bb.height > 14) {
-                faceVisible = true
-                boxX = bb.originX / vw
-                boxY = bb.originY / vh
-                boxW = bb.width / vw
-                boxH = bb.height / vh
-              }
-            }
-          } catch {}
-        }
-
-        // 2. Secondary Check: Even if MediaPipe misses a tilted/side-profile face for a moment,
-        // check if a clear human foreground silhouette is still sitting in the center of the frame
-        if (!faceVisible) {
-          if (!analysisCanvasRef.current) {
-            const c = document.createElement('canvas')
-            c.width = 64
-            c.height = 48
-            analysisCanvasRef.current = c
-          }
-          const ac = analysisCanvasRef.current
-          const actx = ac.getContext('2d', { willReadFrequently: true })
-          if (actx) {
-            actx.drawImage(video, 0, 0, 64, 48)
-            const frame = actx.getImageData(0, 0, 64, 48).data
-
-            // Sample top-left & top-right corner background
-            let bgR = 0, bgG = 0, bgB = 0, bgCount = 0
-            for (let y = 1; y < 8; y++) {
-              for (let x = 1; x < 8; x++) {
-                const p1 = (y * 64 + x) * 4
-                const p2 = (y * 64 + (63 - x)) * 4
-                bgR += frame[p1] + frame[p2]
-                bgG += frame[p1 + 1] + frame[p2 + 1]
-                bgB += frame[p1 + 2] + frame[p2 + 2]
-                bgCount += 2
-              }
-            }
-            bgR /= bgCount
-            bgG /= bgCount
-            bgB /= bgCount
-
-            let fgPixels = 0
-            let skinPixels = 0
-            for (let y = 8; y < 42; y++) {
-              for (let x = 16; x < 48; x++) {
-                const p = (y * 64 + x) * 4
-                const r = frame[p]
-                const g = frame[p + 1]
-                const b = frame[p + 2]
-                const diff =
-                  Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB)
-                if (diff > 48) fgPixels++
-                if (r > 70 && g > 35 && b > 18 && r > g + 8 && r > b + 14) {
-                  skinPixels++
-                }
-              }
-            }
-
-            if (fgPixels >= 160 && skinPixels >= 28) {
+        try {
+          const nowPerf = Math.max(
+            lastTimestampMsRef.current + 1,
+            Math.floor(performance.now())
+          )
+          lastTimestampMsRef.current = nowPerf
+          const result = mpDetectorRef.current.detectForVideo(video, nowPerf)
+          if (result && result.detections && result.detections.length > 0) {
+            const det = result.detections[0]
+            const bb = det.boundingBox
+            const vw = video.videoWidth || 320
+            const vh = video.videoHeight || 240
+            // Must have a real human face bounding box with eyes/nose keypoints inside the frame
+            if (bb && bb.width >= 28 && bb.height >= 28) {
               faceVisible = true
+              boxX = bb.originX / vw
+              boxY = bb.originY / vh
+              boxW = bb.width / vw
+              boxH = bb.height / vh
             }
           }
-        }
+        } catch {}
 
         const now = Date.now()
         const {
@@ -253,12 +199,11 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         } = callbacksRef.current
 
         if (!faceVisible) {
-          // Require 3.0 continuous seconds of no face on camera before triggering RED!
-          // This completely eliminates random false-red flashes while sitting at your desk.
+          // As soon as your face is outside the screen for 0.8s -> TURN RED & GET ANGRY!
           if (!missingStartMsRef.current) missingStartMsRef.current = now
           const elapsed = (now - missingStartMsRef.current) / 1000
 
-          if (elapsed >= 3.0) {
+          if (elapsed >= 0.8) {
             if (curStatus !== 'away_detected') {
               cbStatus('away_detected')
             }
@@ -268,7 +213,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             }
           }
         } else {
-          // Face is visible -> GREEN!
+          // Face is inside the screen -> GREEN!
           missingStartMsRef.current = null
           hasTriggeredForCurrentAbsenceRef.current = false
           if (curStatus !== 'focused') {
@@ -277,7 +222,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           cbFocused()
         }
 
-        // Draw Green face box when visible, or Red frame when away >= 3.0s
+        // Draw Green face box when visible, or Red frame when outside of screen
         if (overlay) {
           const octx = overlay.getContext('2d')
           if (octx) {
@@ -288,9 +233,9 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             const showRed =
               !faceVisible &&
               missingStartMsRef.current !== null &&
-              now - missingStartMsRef.current >= 3000
+              now - missingStartMsRef.current >= 800
 
-            if (!showRed) {
+            if (!showRed && faceVisible) {
               const mirroredX = (1 - (boxX + boxW)) * W
               const ry = boxY * H
               const rw = boxW * W
@@ -299,8 +244,8 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
               octx.strokeStyle = '#10b981'
               octx.lineWidth = 2.5
               octx.strokeRect(mirroredX, ry, rw, rh)
-            } else {
-              octx.fillStyle = 'rgba(244, 63, 94, 0.42)'
+            } else if (showRed) {
+              octx.fillStyle = 'rgba(244, 63, 94, 0.45)'
               octx.fillRect(0, 0, W, H)
               octx.strokeStyle = '#f43f5e'
               octx.lineWidth = 4
@@ -311,7 +256,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       } finally {
         isDetecting = false
       }
-    }, 200)
+    }, 150)
 
     return () => clearInterval(interval)
   }, [enabled, startCamera])

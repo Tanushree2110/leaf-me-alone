@@ -1,4 +1,4 @@
-// Soothing Web Audio Engine with Server-Wide Mute Sync & Cursor Webview Silence
+// Soothing Web Audio Engine with Auto-Unlock on Any Interaction & Audible Singing-Bowl Pad
 
 export type AudioMood = 'studying' | 'storm' | 'silent'
 
@@ -16,7 +16,6 @@ declare global {
 
 function isHiddenCursorWebview(): boolean {
   if (typeof navigator === 'undefined') return false
-  // Cursor's internal preview webview runs inside Electron; never play background audio there!
   return /Electron|Cursor/i.test(navigator.userAgent)
 }
 
@@ -56,14 +55,14 @@ export function nukeAllActiveAudio() {
   reg.contexts.clear()
 }
 
-// Immediately silence any leftover audio on module load
 nukeAllActiveAudio()
 
+// Clear, warm, audible singing-bowl & harp frequencies (260Hz - 784Hz so it plays clearly on laptop speakers!)
 const SOOTHING_CHORDS: number[][] = [
-  [130.81, 196.0, 246.94, 293.66], // C3, G3, B3, D4
-  [110.0, 164.81, 196.0, 261.63],  // A2, E3, G3, C4
-  [87.31, 130.81, 164.81, 220.0],  // F2, C3, E3, A3
-  [98.0, 146.83, 196.0, 246.94],   // G2, D3, G3, B3
+  [261.63, 329.63, 392.0, 523.25], // C4, E4, G4, C5
+  [220.0, 261.63, 329.63, 493.88], // A3, C4, E4, B4
+  [174.61, 261.63, 329.63, 440.0], // F3, C4, E4, A4
+  [196.0, 293.66, 392.0, 493.88],  // G3, D4, G4, B4
 ]
 
 const STORAGE_MUTE_KEY = 'leaf_me_alone_sound_enabled'
@@ -92,7 +91,6 @@ class SoundEngine {
         this.enabled = false
       }
 
-      // Check server-wide mute state on load
       fetch('/api/audio-state')
         .then((r) => r.json())
         .then((d) => {
@@ -118,6 +116,24 @@ class SoundEngine {
           }
         })
       }
+
+      // Auto-unlock AudioContext on any click or keypress in Chrome so soothing music starts immediately!
+      const unlockAndPlay = () => {
+        if (!this.enabled || isHiddenCursorWebview()) return
+        const audio = this.getContext()
+        if (audio && audio.ctx.state === 'suspended') {
+          audio.ctx.resume().then(() => {
+            if (this.enabled && this.currentMood === 'studying') {
+              this.playSoothingPadChord()
+            }
+          }).catch(() => {})
+        } else if (audio && !this.musicTimer && !this.thunderTimer && this.currentMood !== 'silent') {
+          this.applyMoodAudio(this.currentMood)
+        }
+      }
+
+      window.addEventListener('pointerdown', unlockAndPlay, { passive: true })
+      window.addEventListener('keydown', unlockAndPlay, { passive: true })
     }
   }
 
@@ -136,7 +152,7 @@ class SoundEngine {
         this.ctx = new AudioCtx()
         getRegistry().contexts.add(this.ctx)
         this.masterGain = this.ctx.createGain()
-        this.masterGain.gain.setValueAtTime(0.75, this.ctx.currentTime)
+        this.masterGain.gain.setValueAtTime(0.9, this.ctx.currentTime)
         this.masterGain.connect(this.ctx.destination)
       }
     }
@@ -259,7 +275,7 @@ class SoundEngine {
         if (this.enabled && this.currentMood === 'studying') {
           this.playSoothingPadChord()
         }
-      }, 4500)
+      }, 4200)
       getRegistry().timers.add(this.musicTimer)
     } else if (mood === 'storm') {
       this.playThunderCrack()
@@ -267,16 +283,21 @@ class SoundEngine {
         if (this.enabled && this.currentMood === 'storm') {
           this.playThunderCrack()
         }
-      }, 4000)
+      }, 3800)
       getRegistry().timers.add(this.thunderTimer)
     }
   }
 
+  // Soothing warm singing-bowl + gentle harp arpeggio in clear middle register
   private playSoothingPadChord() {
     if (!this.enabled || this.currentMood !== 'studying' || isHiddenCursorWebview()) return
     const audio = this.getContext()
-    if (!audio || audio.ctx.state !== 'running') return
+    if (!audio) return
     const { ctx, out } = audio
+    if (ctx.state === 'suspended') {
+      ctx.resume().catch(() => {})
+      return
+    }
 
     const chord = SOOTHING_CHORDS[this.chordIndex % SOOTHING_CHORDS.length]
     this.chordIndex++
@@ -287,21 +308,23 @@ class SoundEngine {
       const gain = ctx.createGain()
 
       osc.type = 'sine'
-      osc.frequency.setValueAtTime(freq, now)
+      const startOffset = i * 0.18
+      osc.frequency.setValueAtTime(freq, now + startOffset)
 
-      gain.gain.setValueAtTime(0.0001, now)
-      gain.gain.linearRampToValueAtTime(0.016 / (1 + i * 0.25), now + 1.4)
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + 4.3)
+      gain.gain.setValueAtTime(0.0001, now + startOffset)
+      gain.gain.linearRampToValueAtTime(0.055 / (1 + i * 0.2), now + startOffset + 0.9)
+      gain.gain.exponentialRampToValueAtTime(0.0005, now + 4.0)
 
       osc.connect(gain)
       gain.connect(out)
       this.registerSource(osc)
 
-      osc.start(now)
-      osc.stop(now + 4.4)
+      osc.start(now + startOffset)
+      osc.stop(now + 4.1)
     })
   }
 
+  // Deep thunder rumble when RED / not studying
   public playThunderCrack() {
     if (!this.enabled || isHiddenCursorWebview()) return
     const audio = this.getContext()
@@ -322,11 +345,11 @@ class SoundEngine {
 
     const filter = ctx.createBiquadFilter()
     filter.type = 'lowpass'
-    filter.frequency.setValueAtTime(320, now)
+    filter.frequency.setValueAtTime(360, now)
     filter.frequency.exponentialRampToValueAtTime(65, now + 1.3)
 
     const gain = ctx.createGain()
-    gain.gain.setValueAtTime(0.28, now)
+    gain.gain.setValueAtTime(0.35, now)
     gain.gain.exponentialRampToValueAtTime(0.001, now + 1.35)
 
     noise.connect(filter)
@@ -354,7 +377,7 @@ class SoundEngine {
       osc.frequency.setValueAtTime(freq, now + idx * 0.08)
 
       gain.gain.setValueAtTime(0.0001, now + idx * 0.08)
-      gain.gain.linearRampToValueAtTime(0.05, now + idx * 0.08 + 0.03)
+      gain.gain.linearRampToValueAtTime(0.06, now + idx * 0.08 + 0.03)
       gain.gain.exponentialRampToValueAtTime(0.0001, now + idx * 0.08 + 0.45)
 
       osc.connect(gain)
@@ -391,7 +414,7 @@ class SoundEngine {
       osc.frequency.setValueAtTime(freq, t0)
 
       gain.gain.setValueAtTime(0.0001, t0)
-      gain.gain.linearRampToValueAtTime(0.06, t0 + 0.04)
+      gain.gain.linearRampToValueAtTime(0.07, t0 + 0.04)
       gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.9)
 
       osc.connect(gain)
@@ -416,7 +439,7 @@ class SoundEngine {
     osc.frequency.setValueAtTime(528.0, now)
 
     gain.gain.setValueAtTime(0.0001, now)
-    gain.gain.linearRampToValueAtTime(0.08, now + 0.03)
+    gain.gain.linearRampToValueAtTime(0.09, now + 0.03)
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 1.5)
 
     osc.connect(gain)

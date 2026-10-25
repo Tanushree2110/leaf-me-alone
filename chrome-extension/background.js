@@ -21,6 +21,20 @@ async function snapshotExistingTabs() {
 
 snapshotExistingTabs()
 
+async function notifyBlockedNewTab(reason) {
+  try {
+    await fetch('http://localhost:5173/api/new-tab-blocked', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason }),
+    })
+  } catch {}
+  await sendToGameTabs({
+    type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
+    reason,
+  })
+}
+
 async function sendToGameTabs(payload) {
   const allTabs = await chrome.tabs.query({})
   const gameTabs = allTabs.filter(
@@ -79,10 +93,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (sender?.tab?.id) {
       chrome.tabs.remove(sender.tab.id).catch(() => {})
     }
-    sendToGameTabs({
-      type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
-      reason: 'Tried opening a standalone New Tab (+ / Cmd+T)',
-    })
+    notifyBlockedNewTab('Tried opening a standalone New Tab (+ / Cmd+T)')
     sendResponse({ ok: true })
     return true
   }
@@ -134,10 +145,9 @@ chrome.tabs.onCreated.addListener(async (tab) => {
         await chrome.tabs.remove(tab.id)
       } catch {}
     }
-    await sendToGameTabs({
-      type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
-      reason: 'Blocked opening a standalone New Tab (only links from existing tabs allowed)',
-    })
+    await notifyBlockedNewTab(
+      'Blocked opening a standalone New Tab (only links from existing tabs allowed)'
+    )
   }
 })
 
