@@ -42,7 +42,7 @@ import {
   pickRandomDialogue,
 } from './utils/dialogue'
 import { ROOM_SKINS } from './utils/skins'
-import { soundFX } from './utils/sound'
+import { nukeAllActiveAudio, soundFX } from './utils/sound'
 import { StudioCanvas } from './components/StudioCanvas'
 import { PolaroidModal } from './components/PolaroidModal'
 import { WebcamGuard } from './components/WebcamGuard'
@@ -1019,19 +1019,32 @@ export function App() {
               const next = !soundEnabled
               setSoundEnabled(next)
               soundFX.setEnabled(next)
+              if (!next) {
+                nukeAllActiveAudio()
+              }
             }}
-            className={`rounded-lg border p-1.5 transition ${
+            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-semibold transition ${
               soundEnabled
-                ? 'border-stone-800 bg-stone-900 text-emerald-400 hover:bg-stone-800'
-                : 'border-stone-800 bg-stone-900 text-stone-500'
+                ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300 hover:bg-emerald-900/50'
+                : 'border-rose-500/40 bg-rose-950/40 text-rose-300 hover:bg-rose-900/50'
             }`}
             title={
               soundEnabled
-                ? 'Mood Audio ON (Serene Study Music / Storm Thunder)'
-                : 'Audio Muted'
+                ? 'Click to Mute All Sound'
+                : 'Sound Muted — Click to Enable'
             }
           >
-            {soundEnabled ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+            {soundEnabled ? (
+              <>
+                <Volume2 className="h-3.5 w-3.5 text-emerald-400" />
+                <span className="hidden sm:inline">Sound On</span>
+              </>
+            ) : (
+              <>
+                <VolumeX className="h-3.5 w-3.5 text-rose-400" />
+                <span className="hidden sm:inline">Muted</span>
+              </>
+            )}
           </button>
 
           {/* Demo / Story Preview */}

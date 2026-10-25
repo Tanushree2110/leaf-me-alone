@@ -1,6 +1,46 @@
-// Procedural Web Audio API Sound Engine with Instant Master Mute Cutoff
+// Procedural Web Audio API Sound Engine with Hardware AudioContext Teardown on Mute & HMR Cleanup
 
 export type AudioMood = 'studying' | 'storm' | 'silent'
+
+interface GlobalAudioRegistry {
+  contexts: Set<AudioContext>
+  timers: Set<ReturnType<typeof setInterval>>
+}
+
+declare global {
+  interface Window {
+    __leafAudioRegistry?: GlobalAudioRegistry
+  }
+}
+
+function getRegistry(): GlobalAudioRegistry {
+  if (typeof window === 'undefined') {
+    return { contexts: new Set(), timers: new Set() }
+  }
+  if (!window.__leafAudioRegistry) {
+    window.__leafAudioRegistry = {
+      contexts: new Set(),
+      timers: new Set(),
+    }
+  }
+  return window.__leafAudioRegistry
+}
+
+// Immediately clean up any orphaned contexts/timers from previous HMR reloads
+export function nukeAllActiveAudio() {
+  const reg = getRegistry()
+  reg.timers.forEach((t) => clearInterval(t))
+  reg.timers.clear()
+  reg.contexts.forEach((ctx) => {
+    try {
+      ctx.suspend().catch(() => {})
+      ctx.close().catch(() => {})
+    } catch {}
+  })
+  reg.contexts.clear()
+}
+
+nukeAllActiveAudio()
 
 const SERENE_CHORDS: number[][] = [
   [261.63, 329.63, 392.0, 493.88, 587.33], // Cmaj9
@@ -18,6 +58,7 @@ class SoundEngine {
   private thunderTimer: ReturnType<typeof setInterval> | null = null
   private stormNoiseNode: AudioBufferSourceNode | null = null
   private stormGainNode: GainNode | null = null
+  private activeNodes: Set<AudioNode> = new Set()
   private chordIndex = 0
   private unlocked = false
 
@@ -38,12 +79,13 @@ class SoundEngine {
 
   private getContext(): { ctx: AudioContext; out: GainNode } | null {
     if (!this.enabled) return null
-    if (!this.ctx && typeof window !== 'undefined') {
+    if ((!this.ctx || this.ctx.state === 'closed') && typeof window !== 'undefined') {
       const AudioCtx =
         window.AudioContext ||
         (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
       if (AudioCtx) {
         this.ctx = new AudioCtx()
+        getRegistry().contexts.add(this.ctx)
         this.masterGain = this.ctx.createGain()
         this.masterGain.gain.setValueAtTime(1, this.ctx.currentTime)
         this.masterGain.connect(this.ctx.destination)
@@ -59,28 +101,32 @@ class SoundEngine {
   public setEnabled(val: boolean) {
     this.enabled = val
     if (!val) {
-      // Immediately silence master gain AND suspend AudioContext so any playing notes stop instantly!
+      // Physically disconnect all nodes and close every AudioContext so sound stops 100% guaranteed
       this.stopAllMoodAudio()
-      if (this.ctx && this.masterGain) {
+      if (this.masterGain) {
         try {
-          this.masterGain.gain.cancelScheduledValues(this.ctx.currentTime)
-          this.masterGain.gain.setValueAtTime(0, this.ctx.currentTime)
-          this.ctx.suspend().catch(() => {})
+          this.masterGain.disconnect()
         } catch {}
+        this.masterGain = null
       }
+      if (this.ctx) {
+        try {
+          this.ctx.close().catch(() => {})
+        } catch {}
+        this.ctx = null
+      }
+      nukeAllActiveAudio()
     } else {
-      if (this.ctx && this.masterGain) {
-        try {
-          this.ctx.resume().catch(() => {})
-          this.masterGain.gain.setValueAtTime(1, this.ctx.currentTime)
-        } catch {}
-      }
       this.applyMoodAudio(this.currentMood)
     }
   }
 
   public isEnabled(): boolean {
     return this.enabled
+  }
+
+  public destroy() {
+    this.setEnabled(false)
   }
 
   public setMood(mood: AudioMood) {
@@ -101,23 +147,40 @@ class SoundEngine {
   private stopAllMoodAudio() {
     if (this.musicTimer) {
       clearInterval(this.musicTimer)
+      getRegistry().timers.delete(this.musicTimer)
       this.musicTimer = null
     }
     if (this.thunderTimer) {
       clearInterval(this.thunderTimer)
+      getRegistry().timers.delete(this.thunderTimer)
       this.thunderTimer = null
     }
     if (this.stormNoiseNode) {
       try {
         this.stormNoiseNode.stop()
       } catch {}
-      this.stormNoiseNode.disconnect()
+      try {
+        this.stormNoiseNode.disconnect()
+      } catch {}
       this.stormNoiseNode = null
     }
     if (this.stormGainNode) {
-      this.stormGainNode.disconnect()
+      try {
+        this.stormGainNode.disconnect()
+      } catch {}
       this.stormGainNode = null
     }
+    this.activeNodes.forEach((node) => {
+      try {
+        if ('stop' in node && typeof (node as AudioScheduledSourceNode).stop === 'function') {
+          ;(node as AudioScheduledSourceNode).stop()
+        }
+      } catch {}
+      try {
+        node.disconnect()
+      } catch {}
+    })
+    this.activeNodes.clear()
   }
 
   private applyMoodAudio(mood: AudioMood) {
@@ -134,6 +197,7 @@ class SoundEngine {
           this.playSereneChordSlice()
         }
       }, 3600)
+      getRegistry().timers.add(this.musicTimer)
     } else if (mood === 'storm') {
       this.startRoughStormLoop()
       this.playThunderCrack()
@@ -142,6 +206,7 @@ class SoundEngine {
           this.playThunderCrack()
         }
       }, 4200)
+      getRegistry().timers.add(this.thunderTimer)
     }
   }
 
@@ -159,6 +224,7 @@ class SoundEngine {
     masterFilter.type = 'lowpass'
     masterFilter.frequency.setValueAtTime(920, now)
     masterFilter.connect(out)
+    this.activeNodes.add(masterFilter)
 
     chord.forEach((freq, i) => {
       const osc = ctx.createOscillator()
@@ -167,28 +233,16 @@ class SoundEngine {
       osc.frequency.setValueAtTime(freq, now + i * 0.12)
 
       gain.gain.setValueAtTime(0.0001, now + i * 0.12)
-      gain.gain.linearRampToValueAtTime(0.025, now + i * 0.12 + 0.45)
+      gain.gain.linearRampToValueAtTime(0.024, now + i * 0.12 + 0.45)
       gain.gain.exponentialRampToValueAtTime(0.0008, now + 3.5)
 
       osc.connect(gain)
       gain.connect(masterFilter)
+      this.activeNodes.add(osc)
+      osc.onended = () => this.activeNodes.delete(osc)
       osc.start(now + i * 0.12)
       osc.stop(now + 3.55)
     })
-
-    const melodyFreq = chord[chord.length - 1] * 2
-    const bellOsc = ctx.createOscillator()
-    const bellGain = ctx.createGain()
-    bellOsc.type = 'sine'
-    bellOsc.frequency.setValueAtTime(melodyFreq, now + 1.4)
-    bellGain.gain.setValueAtTime(0.0001, now + 1.4)
-    bellGain.gain.linearRampToValueAtTime(0.016, now + 1.5)
-    bellGain.gain.exponentialRampToValueAtTime(0.0001, now + 3.2)
-
-    bellOsc.connect(bellGain)
-    bellGain.connect(masterFilter)
-    bellOsc.start(now + 1.4)
-    bellOsc.stop(now + 3.25)
   }
 
   private startRoughStormLoop() {
@@ -219,7 +273,7 @@ class SoundEngine {
     filter.Q.setValueAtTime(0.7, ctx.currentTime)
 
     const gain = ctx.createGain()
-    gain.gain.setValueAtTime(0.3, ctx.currentTime)
+    gain.gain.setValueAtTime(0.28, ctx.currentTime)
 
     noise.connect(filter)
     filter.connect(gain)
@@ -228,6 +282,7 @@ class SoundEngine {
 
     this.stormNoiseNode = noise
     this.stormGainNode = gain
+    this.activeNodes.add(noise)
   }
 
   public playThunderCrack() {
@@ -237,11 +292,11 @@ class SoundEngine {
     const { ctx, out } = audio
     const now = ctx.currentTime
 
-    const bufferSize = Math.floor(ctx.sampleRate * 1.5)
+    const bufferSize = Math.floor(ctx.sampleRate * 1.4)
     const buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate)
     const data = buffer.getChannelData(0)
     for (let i = 0; i < bufferSize; i++) {
-      const env = i < ctx.sampleRate * 0.08 ? 1.0 : Math.exp(-i / (ctx.sampleRate * 0.5))
+      const env = i < ctx.sampleRate * 0.08 ? 1.0 : Math.exp(-i / (ctx.sampleRate * 0.45))
       data[i] = (Math.random() * 2 - 1) * env
     }
 
@@ -251,17 +306,19 @@ class SoundEngine {
     const filter = ctx.createBiquadFilter()
     filter.type = 'lowpass'
     filter.frequency.setValueAtTime(880, now)
-    filter.frequency.exponentialRampToValueAtTime(95, now + 1.35)
+    filter.frequency.exponentialRampToValueAtTime(95, now + 1.3)
 
     const gain = ctx.createGain()
-    gain.gain.setValueAtTime(0.35, now)
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.45)
+    gain.gain.setValueAtTime(0.32, now)
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.35)
 
     noise.connect(filter)
     filter.connect(gain)
     gain.connect(out)
+    this.activeNodes.add(noise)
+    noise.onended = () => this.activeNodes.delete(noise)
     noise.start(now)
-    noise.stop(now + 1.5)
+    noise.stop(now + 1.4)
   }
 
   public playLeafSprout() {
@@ -285,6 +342,8 @@ class SoundEngine {
 
       osc.connect(gain)
       gain.connect(out)
+      this.activeNodes.add(osc)
+      osc.onended = () => this.activeNodes.delete(osc)
       osc.start(now + idx * 0.065)
       osc.stop(now + idx * 0.065 + 0.48)
     })
@@ -311,6 +370,8 @@ class SoundEngine {
 
       osc.connect(gain)
       gain.connect(out)
+      this.activeNodes.add(osc)
+      osc.onended = () => this.activeNodes.delete(osc)
       osc.start(now + offset)
       osc.stop(now + offset + 0.04)
     })
@@ -341,6 +402,8 @@ class SoundEngine {
 
       osc.connect(gain)
       gain.connect(out)
+      this.activeNodes.add(osc)
+      osc.onended = () => this.activeNodes.delete(osc)
       osc.start(t0)
       osc.stop(t0 + 0.9)
     })
@@ -369,6 +432,11 @@ class SoundEngine {
     osc.connect(gain)
     overtone.connect(gain)
     gain.connect(out)
+
+    this.activeNodes.add(osc)
+    this.activeNodes.add(overtone)
+    osc.onended = () => this.activeNodes.delete(osc)
+    overtone.onended = () => this.activeNodes.delete(overtone)
 
     osc.start(now)
     overtone.start(now)
@@ -400,3 +468,10 @@ class SoundEngine {
 }
 
 export const soundFX = new SoundEngine()
+
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    soundFX.destroy()
+    nukeAllActiveAudio()
+  })
+}
