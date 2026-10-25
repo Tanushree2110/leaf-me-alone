@@ -46,8 +46,6 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   }, [status, onStatusChange, onAwayDetected, onBackFocused])
 
   // Initialize local MediaPipe Neural FaceDetector from /wasm and /models
-  // Confidence 0.25 detects faces even at an angle, with glasses, or in dim lighting,
-  // while still returning 0 detections on an empty wall/chair!
   useEffect(() => {
     let cancelled = false
     async function initMediaPipe() {
@@ -59,7 +57,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             modelAssetPath: '/models/blaze_face_short_range.tflite',
           },
           runningMode: 'VIDEO',
-          minDetectionConfidence: 0.25,
+          minDetectionConfidence: 0.28,
         })
         if (!cancelled) {
           mpDetectorRef.current = detector
@@ -181,7 +179,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             const bb = det.boundingBox
             const vw = video.videoWidth || 320
             const vh = video.videoHeight || 240
-            if (bb && bb.width >= 16 && bb.height >= 16) {
+            if (bb && bb.width >= 18 && bb.height >= 18) {
               faceVisible = true
               boxX = bb.originX / vw
               boxY = bb.originY / vh
@@ -200,11 +198,11 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         } = callbacksRef.current
 
         if (!faceVisible) {
-          // 1.5s continuous absence before turning RED (fast when you step out of frame, zero false-red when blinking/turning head)
+          // 1.4s continuous absence before turning RED
           if (!missingStartMsRef.current) missingStartMsRef.current = now
           const elapsed = (now - missingStartMsRef.current) / 1000
 
-          if (elapsed >= 1.5) {
+          if (elapsed >= 1.4) {
             if (curStatus !== 'away_detected') {
               cbStatus('away_detected')
             }
@@ -234,7 +232,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             const showRed =
               !faceVisible &&
               missingStartMsRef.current !== null &&
-              now - missingStartMsRef.current >= 1500
+              now - missingStartMsRef.current >= 1400
 
             if (!showRed) {
               const mirroredX = (1 - (boxX + boxW)) * W

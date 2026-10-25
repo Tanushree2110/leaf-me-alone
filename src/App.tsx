@@ -427,15 +427,42 @@ export function App() {
     [vineSegments, pomodoro.enabled, pomodoro.phase, recordViolationInCurrentSession]
   )
 
-  // Listen to Chrome Extension postMessage events + Vite WebSocket /api/new-tab-blocked bridge
+  // Listen to Chrome Extension events (compatible with both v1.0 and v1.3 of the extension!) + Vite WS bridge
+  const allowedChromeTabIdsRef = useRef<Set<string>>(new Set())
+  const gameChromeTabIdRef = useRef<number | null>(null)
+  const hasSnapshottedInitialTabsRef = useRef<boolean>(false)
+
   useEffect(() => {
     let lastHandledBlockCount = 0
 
     const handleBlockedTabEvent = (reason?: string) => {
       if (Date.now() - lastDistractionMsRef.current < 800) return
+      // Snap focus back to the game tab in Chrome if we know its tab ID
+      if (gameChromeTabIdRef.current) {
+        window.postMessage(
+          {
+            type: 'LEAF_APP_ACTIVATE_TAB',
+            chromeTabId: gameChromeTabIdRef.current,
+          },
+          '*'
+        )
+      }
       triggerDistraction(
         reason || 'Blocked opening a standalone New Tab (+ / Cmd+T)',
         'blocked_new_tab'
+      )
+    }
+
+    const isBlankNewTab = (url?: string, title?: string) => {
+      const u = (url || '').trim().toLowerCase()
+      const t = (title || '').trim().toLowerCase()
+      return (
+        !u ||
+        u.startsWith('chrome://newtab') ||
+        u.startsWith('chrome-extension://') ||
+        u.startsWith('edge://newtab') ||
+        u === 'about:blank' ||
+        t === 'new tab'
       )
     }
 
@@ -451,6 +478,95 @@ export function App() {
         setExtensionConnected(true)
         if (typeof data.allowedCount === 'number') {
           setAllowedTabsCount(data.allowedCount)
+        }
+      }
+
+      // v1.0 / v1.1 / v1.2 sync message
+      if (data.type === 'LEAF_CHROME_TABS_SYNC' && Array.isArray(data.tabs)) {
+        setExtensionConnected(true)
+        const tabs = data.tabs as Array<{
+          chromeTabId: number
+          title: string
+          url: string
+          openerTabId: number | null
+        }>
+
+        const gameTab = tabs.find(
+          (t) =>
+            t.url &&
+            (t.url.includes('localhost:5173') || t.url.includes('127.0.0.1:5173'))
+        )
+        if (gameTab && gameTab.chromeTabId) {
+          gameChromeTabIdRef.current = gameTab.chromeTabId
+        }
+
+        if (!hasSnapshottedInitialTabsRef.current && tabs.length > 0) {
+          hasSnapshottedInitialTabsRef.current = true
+          tabs.forEach((t) => {
+            if (t.chromeTabId && !isBlankNewTab(t.url, t.title)) {
+              allowedChromeTabIdsRef.current.add(String(t.chromeTabId))
+            }
+          })
+          setAllowedTabsCount(allowedChromeTabIdsRef.current.size || tabs.length)
+        } else if (hasSnapshottedInitialTabsRef.current) {
+          // Check if any new tab appeared in the sync list
+          for (const t of tabs) {
+            const idStr = String(t.chromeTabId)
+            if (allowedChromeTabIdsRef.current.has(idStr)) continue
+
+            const openedFromAllowed =
+              t.openerTabId &&
+              allowedChromeTabIdsRef.current.has(String(t.openerTabId))
+
+            if (openedFromAllowed && !isBlankNewTab(t.url, t.title)) {
+              allowedChromeTabIdsRef.current.add(idStr)
+              setAllowedTabsCount(allowedChromeTabIdsRef.current.size)
+            } else if (isBlankNewTab(t.url, t.title) || !openedFromAllowed) {
+              allowedChromeTabIdsRef.current.add(idStr)
+              handleBlockedTabEvent(
+                'Blocked opening a standalone New Tab (+ / Cmd+T)'
+              )
+            }
+          }
+        }
+      }
+
+      // v1.0 / v1.1 tab created message
+      if (data.type === 'LEAF_CHROME_TAB_CREATED' && data.tab) {
+        const newTab = data.tab as {
+          chromeTabId: number
+          title: string
+          url: string
+          openerTabId: number | null
+        }
+        const idStr = String(newTab.chromeTabId)
+        const openedFromAllowed =
+          newTab.openerTabId &&
+          allowedChromeTabIdsRef.current.has(String(newTab.openerTabId))
+
+        if (openedFromAllowed && !isBlankNewTab(newTab.url, newTab.title)) {
+          allowedChromeTabIdsRef.current.add(idStr)
+          setAllowedTabsCount(allowedChromeTabIdsRef.current.size)
+        } else {
+          allowedChromeTabIdsRef.current.add(idStr)
+          handleBlockedTabEvent(
+            'Blocked opening a standalone New Tab (+ / Cmd+T)'
+          )
+        }
+      }
+
+      // v1.0 tab activated message
+      if (data.type === 'LEAF_CHROME_TAB_ACTIVATED' && data.tab) {
+        const actTab = data.tab as {
+          chromeTabId: number
+          title: string
+          url: string
+          openerTabId: number | null
+        }
+        if (isBlankNewTab(actTab.url, actTab.title)) {
+          handleBlockedTabEvent(
+            'Blocked opening a standalone New Tab (+ / Cmd+T)'
+          )
         }
       }
 
@@ -472,7 +588,6 @@ export function App() {
     }
 
     window.addEventListener('message', handleMessage)
-    window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
     return () => {
       window.removeEventListener('message', handleMessage)
     }
