@@ -17,12 +17,37 @@ export type CameraStatus =
   | 'away_detected'
   | 'permission_denied'
 
+export type RoomSkinId =
+  | 'cozy_greenhouse'
+  | 'tokyo_lofi'
+  | 'parisian_atelier'
+  | 'nordic_cabin'
+  | 'dark_academia'
+
+export interface RoomSkin {
+  id: RoomSkinId
+  name: string
+  subtitle: string
+  previewColor: string
+  wallTop: string
+  wallBottom: string
+  wallColdTop: string
+  wallColdBottom: string
+  floorTop: string
+  floorBottom: string
+  trimColor: string
+  deskColor: string
+  rugColor: string
+  windowFrameColor: string
+  sweaterColor: string
+}
+
 export interface AllowedTab {
   id: string
   title: string
   url: string
-  parentId?: string // If expanded from an initial allowed tab
-  chromeTabId?: string | number // Real Chrome tab ID when synced via Chrome
+  parentId?: string
+  chromeTabId?: string | number
   windowIndex?: number
   tabIndex?: number
   isActive?: boolean
@@ -34,12 +59,11 @@ export interface LeafNode {
   side: -1 | 1
   size: number
   baseAngle: number
-  health: number // 1.0 = vibrant emerald, 0.0 = crispy brown
+  health: number
   status: 'attached' | 'dying' | 'falling' | 'fallen' | 'swept'
   hasBlossom: boolean
   blossomScale: number
   blossomColor: string
-  // Falling / Floor physics
   x: number
   y: number
   vx: number

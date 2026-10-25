@@ -1,21 +1,30 @@
 import React, { useEffect, useRef } from 'react'
-import { FocusMode, LeafNode, RoommateState, RoomUpgrade, VineSegment } from '../types'
+import {
+  FocusMode,
+  LeafNode,
+  RoommateState,
+  RoomSkinId,
+  RoomUpgrade,
+  VineSegment,
+} from '../types'
 import { fbm2D, noise2D } from '../utils/noise'
+import { getSkinById } from '../utils/skins'
 
 interface StudioCanvasProps {
   focusMode: FocusMode
   roommateState: RoommateState
+  skinId: RoomSkinId
+  isRoughWeather: boolean
   leaves: LeafNode[]
   vineSegments: VineSegment[]
-  vineGrowthProgress: number // 0 to 1
-  nextLeafProgress: number // 0 to 1 (live progress toward sprouting next leaf)
+  vineGrowthProgress: number
+  nextLeafProgress: number
   upgrades: RoomUpgrade[]
   daysSinceDoomscroll: number
   goldenLeavesPainted: number
   roomTempCelsius: number
-  comebackProgress: number // 0 to 1
+  comebackProgress: number
   dialogueText: string
-  ambientRainOn?: boolean
   canvasRef: React.RefObject<HTMLCanvasElement>
 }
 
@@ -29,23 +38,26 @@ interface RainDrop {
 export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
   const { canvasRef } = props
 
-  // Keep latest props in a ref so the 60fps animation loop never resets `t` on state updates!
   const latestPropsRef = useRef<StudioCanvasProps>(props)
   useEffect(() => {
     latestPropsRef.current = props
   }, [props])
 
   const rainRef = useRef<RainDrop[]>([])
-  const lightningRef = useRef<{ alpha: number; nextFlash: number }>({ alpha: 0, nextFlash: 150 })
+  const lightningRef = useRef<{ alpha: number; boltX: number; nextFlash: number }>({
+    alpha: 0,
+    boltX: 160,
+    nextFlash: 65,
+  })
 
   useEffect(() => {
     const drops: RainDrop[] = []
-    for (let i = 0; i < 85; i++) {
+    for (let i = 0; i < 115; i++) {
       drops.push({
-        x: Math.random() * 300 + 48,
-        y: Math.random() * 310 + 48,
-        length: 11 + Math.random() * 14,
-        speed: 6 + Math.random() * 6,
+        x: Math.random() * 310 + 44,
+        y: Math.random() * 320 + 44,
+        length: 14 + Math.random() * 18,
+        speed: 8 + Math.random() * 7,
       })
     }
     rainRef.current = drops
@@ -64,6 +76,8 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       const {
         focusMode,
         roommateState,
+        skinId,
+        isRoughWeather,
         leaves,
         vineSegments,
         vineGrowthProgress,
@@ -74,9 +88,9 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         roomTempCelsius,
         comebackProgress,
         dialogueText,
-        ambientRainOn,
       } = latestPropsRef.current
 
+      const skin = getSkinById(skinId)
       const t = (now - startTime) * 0.001
       const W = canvas.width
       const H = canvas.height
@@ -84,26 +98,31 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       const hasUpgrade = (id: RoomUpgrade['id']) =>
         upgrades.some((u) => u.id === id && u.unlocked)
 
+      const isStormy =
+        isRoughWeather ||
+        focusMode === 'distracted' ||
+        focusMode === 'last_leaf_climax'
+
       ctx.clearRect(0, 0, W, H)
 
-      // 1. STUDIO WALL BACKGROUND
-      const isCold = focusMode === 'distracted' || focusMode === 'last_leaf_climax'
+      // 1. STUDIO WALL BACKGROUND (Themed by RoomSkin)
       const wallGrad = ctx.createLinearGradient(0, 0, 0, H)
-      if (focusMode === 'last_leaf_climax') {
-        wallGrad.addColorStop(0, '#131624')
-        wallGrad.addColorStop(1, '#1d1b29')
-      } else if (isCold) {
-        wallGrad.addColorStop(0, '#1a2332')
-        wallGrad.addColorStop(1, '#242b38')
+      if (isStormy) {
+        wallGrad.addColorStop(0, skin.wallColdTop)
+        wallGrad.addColorStop(1, skin.wallColdBottom)
       } else {
-        wallGrad.addColorStop(0, '#2a211d')
-        wallGrad.addColorStop(1, '#3b2d26')
+        wallGrad.addColorStop(0, skin.wallTop)
+        wallGrad.addColorStop(1, skin.wallBottom)
       }
       ctx.fillStyle = wallGrad
       ctx.fillRect(0, 0, W, H)
 
-      // Subtle wallpaper texture stripes
-      ctx.strokeStyle = isCold ? 'rgba(148, 163, 184, 0.04)' : 'rgba(251, 191, 36, 0.04)'
+      // Subtle wallpaper / paneling stripes
+      ctx.strokeStyle = isStormy
+        ? 'rgba(148, 163, 184, 0.04)'
+        : skinId === 'tokyo_lofi'
+        ? 'rgba(168, 85, 247, 0.06)'
+        : 'rgba(251, 191, 36, 0.04)'
       ctx.lineWidth = 2
       for (let x = 24; x < W; x += 36) {
         ctx.beginPath()
@@ -112,15 +131,15 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         ctx.stroke()
       }
 
-      // 2. COZY WOODEN FLOOR & BASEBOARD
+      // 2. WOODEN FLOOR & BASEBOARD (Themed by RoomSkin)
       const floorY = H - 105
       const floorGrad = ctx.createLinearGradient(0, floorY, 0, H)
-      floorGrad.addColorStop(0, isCold ? '#232028' : '#3d281d')
-      floorGrad.addColorStop(1, isCold ? '#16141a' : '#261810')
+      floorGrad.addColorStop(0, isStormy ? '#1e2029' : skin.floorTop)
+      floorGrad.addColorStop(1, isStormy ? '#12131a' : skin.floorBottom)
       ctx.fillStyle = floorGrad
       ctx.fillRect(0, floorY, W, 105)
 
-      ctx.fillStyle = isCold ? '#334155' : '#5c3d2e'
+      ctx.fillStyle = isStormy ? '#334155' : skin.trimColor
       ctx.fillRect(0, floorY - 10, W, 10)
       ctx.strokeStyle = 'rgba(0,0,0,0.4)'
       ctx.lineWidth = 1.5
@@ -151,18 +170,14 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
 
       // Sky gradient outside window
       const skyGrad = ctx.createLinearGradient(winX, winY, winX, winY + winH)
-      if (focusMode === 'last_leaf_climax') {
+      if (isStormy) {
         skyGrad.addColorStop(0, '#090d16')
-        skyGrad.addColorStop(0.6, '#172036')
-        skyGrad.addColorStop(1, '#23293d')
-      } else if (focusMode === 'distracted') {
-        skyGrad.addColorStop(0, '#334155')
-        skyGrad.addColorStop(0.6, '#475569')
-        skyGrad.addColorStop(1, '#64748b')
-      } else if (ambientRainOn) {
-        skyGrad.addColorStop(0, '#1e293b')
-        skyGrad.addColorStop(0.6, '#334155')
-        skyGrad.addColorStop(1, '#475569')
+        skyGrad.addColorStop(0.55, '#172136')
+        skyGrad.addColorStop(1, '#263147')
+      } else if (skinId === 'tokyo_lofi') {
+        skyGrad.addColorStop(0, '#1e1b4b')
+        skyGrad.addColorStop(0.6, '#4c1d95')
+        skyGrad.addColorStop(1, '#f472b6')
       } else {
         skyGrad.addColorStop(0, '#0284c7')
         skyGrad.addColorStop(0.55, '#7dd3fc')
@@ -171,14 +186,20 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       ctx.fillStyle = skyGrad
       ctx.fillRect(winX, winY, winW, winH)
 
-      // Sun outside when focused
-      if (focusMode === 'locked_in' || focusMode === 'golden_comeback') {
+      // Sun / Moon outside when studying
+      if (!isStormy) {
         const sunX = winX + 78 + Math.sin(t * 0.4) * 6
         const sunY = winY + 68
         const sunRadial = ctx.createRadialGradient(sunX, sunY, 8, sunX, sunY, 85)
-        sunRadial.addColorStop(0, 'rgba(254, 240, 138, 0.95)')
-        sunRadial.addColorStop(0.4, 'rgba(253, 224, 71, 0.45)')
-        sunRadial.addColorStop(1, 'rgba(253, 224, 71, 0)')
+        if (skinId === 'tokyo_lofi') {
+          sunRadial.addColorStop(0, 'rgba(244, 114, 182, 0.95)')
+          sunRadial.addColorStop(0.45, 'rgba(192, 132, 252, 0.4)')
+          sunRadial.addColorStop(1, 'rgba(192, 132, 252, 0)')
+        } else {
+          sunRadial.addColorStop(0, 'rgba(254, 240, 138, 0.95)')
+          sunRadial.addColorStop(0.4, 'rgba(253, 224, 71, 0.45)')
+          sunRadial.addColorStop(1, 'rgba(253, 224, 71, 0)')
+        }
         ctx.fillStyle = sunRadial
         ctx.beginPath()
         ctx.arc(sunX, sunY, 85, 0, Math.PI * 2)
@@ -187,7 +208,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
 
       // Opposite Greenwich Village Brick Wall (Right side of window view)
       const brickWallX = winX + 194
-      ctx.fillStyle = isCold ? '#472825' : '#7c3a2d'
+      ctx.fillStyle = isStormy ? '#3b211e' : '#7c3a2d'
       ctx.fillRect(brickWallX, winY + 22, winW - 194, winH - 22)
       ctx.strokeStyle = 'rgba(20, 10, 8, 0.35)'
       ctx.lineWidth = 1
@@ -246,74 +267,91 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         ctx.restore()
       }
 
-      // 4. WEATHER SHADERS OUTSIDE WINDOW (Rain, Thunderstorm Lightning, Frost)
-      if (
-        ambientRainOn ||
-        focusMode === 'last_leaf_climax' ||
-        focusMode === 'distracted' ||
-        hasUpgrade('string_lights')
-      ) {
-        const isStorm = focusMode === 'last_leaf_climax'
-        const isLoFiRain =
-          Boolean(ambientRainOn) ||
-          (focusMode === 'locked_in' && hasUpgrade('string_lights'))
-
-        if (isStorm || isLoFiRain || focusMode === 'distracted') {
-          ctx.strokeStyle = isStorm
-            ? 'rgba(186, 230, 253, 0.7)'
-            : ambientRainOn
-            ? 'rgba(224, 242, 254, 0.75)'
-            : 'rgba(148, 163, 184, 0.35)'
-          ctx.lineWidth = isStorm || ambientRainOn ? 1.8 : 1.2
-          const windSlant = isStorm ? -6 : -3
-          for (const drop of rainRef.current) {
-            drop.y += drop.speed * (isStorm ? 1.5 : ambientRainOn ? 1.15 : 0.7)
-            drop.x += windSlant * 0.3
-            if (drop.y > winY + winH) {
-              drop.y = winY - 10
-              drop.x = winX + Math.random() * winW
-            }
-            if (drop.x < winX) drop.x = winX + winW
-            ctx.beginPath()
-            ctx.moveTo(drop.x, drop.y)
-            ctx.lineTo(drop.x + windSlant, drop.y + drop.length)
-            ctx.stroke()
-          }
+      // 4. AUTOMATIC ROUGH RAINSTORM + JAGGED LIGHTNING BOLTS + ROLLING STORM CLOUDS WHEN DISTRACTED!
+      if (isStormy) {
+        // Dark rolling storm clouds across top of window
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.85)'
+        for (let c = 0; c < 5; c++) {
+          const cx = winX + 35 + c * 62 + Math.sin(t * 1.5 + c) * 8
+          const cy = winY + 18 + (c % 2) * 8
+          ctx.beginPath()
+          ctx.arc(cx, cy, 38, 0, Math.PI * 2)
+          ctx.fill()
         }
 
-        if (isStorm) {
-          lightningRef.current.nextFlash -= 1
-          if (lightningRef.current.nextFlash <= 0) {
-            lightningRef.current.alpha = 0.75
-            lightningRef.current.nextFlash = 110 + Math.random() * 160
-          }
-          if (lightningRef.current.alpha > 0.01) {
-            ctx.fillStyle = `rgba(224, 242, 254, ${lightningRef.current.alpha})`
-            ctx.fillRect(winX, winY, winW, winH)
-            lightningRef.current.alpha *= 0.86
-          }
+        // Periodic Lightning Bolt + Sky Flash
+        lightningRef.current.nextFlash -= 1
+        if (lightningRef.current.nextFlash <= 0) {
+          lightningRef.current.alpha = 0.92
+          lightningRef.current.boltX = winX + 55 + Math.random() * 140
+          lightningRef.current.nextFlash = 50 + Math.random() * 65
         }
-      }
 
-      // Creeping Frost Shader along window edges when distracted or cold
-      if (isCold || roomTempCelsius < 16) {
-        const frostIntensity = Math.min(1, Math.max(0.2, (20 - roomTempCelsius) / 12))
+        if (lightningRef.current.alpha > 0.02) {
+          // Bright sky flash
+          ctx.fillStyle = `rgba(224, 242, 254, ${lightningRef.current.alpha * 0.55})`
+          ctx.fillRect(winX, winY, winW, winH)
+
+          // Jagged Forked Lightning Bolt
+          ctx.save()
+          ctx.strokeStyle = `rgba(254, 249, 195, ${lightningRef.current.alpha})`
+          ctx.shadowColor = '#38bdf8'
+          ctx.shadowBlur = 14
+          ctx.lineWidth = 3
+          let bx = lightningRef.current.boltX
+          let by = winY + 10
+          ctx.beginPath()
+          ctx.moveTo(bx, by)
+          for (let seg = 0; seg < 6; seg++) {
+            bx += (seg % 2 === 0 ? -16 : 18)
+            by += 42
+            ctx.lineTo(bx, by)
+          }
+          ctx.stroke()
+          ctx.restore()
+
+          lightningRef.current.alpha *= 0.84
+        }
+
+        // Heavy Slanted Rain Pouring Across the Entire Window
+        ctx.strokeStyle = 'rgba(186, 230, 253, 0.82)'
+        ctx.lineWidth = 2.1
+        ctx.lineCap = 'round'
+        const windSlant = -7
+        for (const drop of rainRef.current) {
+          drop.y += drop.speed * 1.45
+          drop.x += windSlant * 0.45
+          if (drop.y > winY + winH) {
+            drop.y = winY - 12
+            drop.x = winX + Math.random() * (winW + 40)
+          }
+          if (drop.x < winX - 20) {
+            drop.x = winX + winW + 10
+          }
+          ctx.beginPath()
+          ctx.moveTo(drop.x, drop.y)
+          ctx.lineTo(drop.x + windSlant, drop.y + drop.length)
+          ctx.stroke()
+        }
+
+        // Creeping Frost Shader along window edges
+        const frostIntensity = Math.min(1, Math.max(0.35, (21 - roomTempCelsius) / 10))
         const frostGrad = ctx.createRadialGradient(
           winX + winW / 2,
           winY + winH / 2,
-          winW * 0.25,
+          winW * 0.22,
           winX + winW / 2,
           winY + winH / 2,
           winW * 0.72
         )
         frostGrad.addColorStop(0, 'rgba(224, 242, 254, 0)')
-        frostGrad.addColorStop(0.7, `rgba(186, 230, 253, ${0.22 * frostIntensity})`)
-        frostGrad.addColorStop(1, `rgba(224, 242, 254, ${0.62 * frostIntensity})`)
+        frostGrad.addColorStop(0.7, `rgba(186, 230, 253, ${0.25 * frostIntensity})`)
+        frostGrad.addColorStop(1, `rgba(224, 242, 254, ${0.65 * frostIntensity})`)
         ctx.fillStyle = frostGrad
         ctx.fillRect(winX, winY, winW, winH)
 
-        ctx.strokeStyle = `rgba(224, 242, 254, ${0.55 * frostIntensity})`
-        ctx.lineWidth = 1.2
+        ctx.strokeStyle = `rgba(224, 242, 254, ${0.6 * frostIntensity})`
+        ctx.lineWidth = 1.3
         const corners = [
           [winX, winY, 1, 1],
           [winX + winW, winY, -1, 1],
@@ -323,7 +361,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         for (const [cx, cy, dx, dy] of corners) {
           for (let b = 0; b < 5; b++) {
             const angle = (b / 5) * (Math.PI / 2)
-            const len = (24 + fbm2D(b * 3.1, t * 0.2) * 18) * frostIntensity
+            const len = (26 + fbm2D(b * 3.1, t * 0.2) * 18) * frostIntensity
             ctx.beginPath()
             ctx.moveTo(cx, cy)
             ctx.lineTo(cx + Math.cos(angle) * len * dx, cy + Math.sin(angle) * len * dy)
@@ -335,7 +373,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       ctx.restore() // End window glass clip
 
       // Window Mullions (Wooden frame & crossbars)
-      ctx.strokeStyle = isCold ? '#334155' : '#5c3a21'
+      ctx.strokeStyle = isStormy ? '#334155' : skin.windowFrameColor
       ctx.lineWidth = 7
       ctx.beginPath()
       ctx.roundRect(winX, winY, winW, winH, [12, 12, 2, 2])
@@ -350,12 +388,12 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       ctx.stroke()
 
       // Window Sill
-      ctx.fillStyle = isCold ? '#475569' : '#78492a'
+      ctx.fillStyle = isStormy ? '#475569' : skin.trimColor
       ctx.fillRect(winX - 10, winY + winH - 4, winW + 20, 14)
 
-      // 5. PROCEDURAL MATHEMATICAL IVY VINE & LUSH LEAVES (Drawn IN FRONT of window frame so every leaf is vivid & clear!)
+      // 5. PROCEDURAL MATHEMATICAL IVY VINE & LUSH LEAVES
       const windStrength =
-        focusMode === 'last_leaf_climax' ? 14 : focusMode === 'distracted' ? 5.5 : 3.8
+        focusMode === 'last_leaf_climax' ? 15 : isStormy ? 9.5 : 3.8
 
       const totalSegs = vineSegments.length
       const activeSegFloat = Math.max(0.15, vineGrowthProgress) * totalSegs
@@ -367,8 +405,11 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         const segProgress = Math.max(0, Math.min(1, activeSegFloat - i))
         if (segProgress <= 0) break
 
-        const wind0 = noise2D(seg.y0 * 0.015, t * 1.5) * windStrength * (i / totalSegs)
-        const wind1 = noise2D(seg.y1 * 0.015, t * 1.5) * windStrength * ((i + 1) / totalSegs)
+        const wind0 = noise2D(seg.y0 * 0.015, t * (isStormy ? 3.2 : 1.5)) * windStrength * (i / totalSegs)
+        const wind1 =
+          noise2D(seg.y1 * 0.015, t * (isStormy ? 3.2 : 1.5)) *
+          windStrength *
+          ((i + 1) / totalSegs)
 
         const x0 = seg.x0 + wind0
         const y0 = seg.y0
@@ -382,7 +423,6 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         tipX = x1
         tipY = y1
 
-        // Vine stem shadow for depth
         ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)'
         ctx.lineWidth = seg.thickness + 2
         ctx.lineCap = 'round'
@@ -391,11 +431,10 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         ctx.bezierCurveTo(cp1x + 1, cp1y + 2, cp2x + 1, cp2y + 2, x1 + 1, y1 + 2)
         ctx.stroke()
 
-        // Main vine stem
         ctx.strokeStyle =
           focusMode === 'last_leaf_climax'
             ? '#452c1e'
-            : isCold
+            : isStormy
             ? '#15803d'
             : '#22c55e'
         ctx.lineWidth = seg.thickness
@@ -405,8 +444,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         ctx.stroke()
       }
 
-      // Glowing Growing Shoot Bud at the tip of the vine when focused!
-      if (focusMode === 'locked_in' || focusMode === 'golden_comeback') {
+      if (!isStormy) {
         const budScale = 4 + nextLeafProgress * 6 + Math.sin(t * 6) * 1.2
         const budGlow = ctx.createRadialGradient(tipX, tipY, 1, tipX, tipY, budScale * 2.5)
         budGlow.addColorStop(0, 'rgba(74, 222, 128, 0.9)')
@@ -422,24 +460,21 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         ctx.fill()
       }
 
-      // Draw attached / dying leaves along the vine
       for (const leaf of leaves) {
         if (leaf.status !== 'attached' && leaf.status !== 'dying') continue
         const seg = vineSegments[Math.min(leaf.segmentIndex, vineSegments.length - 1)]
         if (!seg) continue
 
         const windOffset =
-          noise2D(seg.y1 * 0.015 + leaf.seed, t * 1.8) *
+          noise2D(seg.y1 * 0.015 + leaf.seed, t * (isStormy ? 3.5 : 1.8)) *
           windStrength *
           ((leaf.segmentIndex + 1) / totalSegs)
 
-        // Offset leaf slightly left/right of stem via petiole stalk so leaves fan out lushly
         const stemX = seg.x1 + windOffset
         const stemY = seg.y1
         const lx = stemX + leaf.side * 12
         const ly = stemY - 3
 
-        // Draw petiole (small leaf stalk)
         ctx.strokeStyle = leaf.health > 0.5 ? '#16a34a' : '#78350f'
         ctx.lineWidth = 2
         ctx.beginPath()
@@ -448,13 +483,13 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         ctx.stroke()
 
         const flutter =
-          noise2D(leaf.seed * 10, t * (focusMode === 'last_leaf_climax' ? 6 : 2.2)) *
-          (focusMode === 'last_leaf_climax' ? 0.45 : 0.2)
+          noise2D(leaf.seed * 10, t * (isStormy ? 6.5 : 2.2)) *
+          (isStormy ? 0.45 : 0.2)
 
         drawProceduralLeaf(ctx, lx, ly, leaf, flutter, t)
       }
 
-      // Terracotta Pot on the left side of the sill (drawn over base of vine)
+      // Terracotta Pot
       const potX = winX + 62
       const potY = winY + winH - 2
       ctx.fillStyle = '#c2410c'
@@ -468,13 +503,19 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       ctx.fillStyle = '#ea580c'
       ctx.fillRect(potX - 25, potY - 35, 50, 8)
 
-      // 6. VOLUMETRIC SUNLIGHT GOD-RAYS (When Locked In)
-      if (focusMode === 'locked_in' || focusMode === 'golden_comeback') {
+      // 6. VOLUMETRIC SUNLIGHT GOD-RAYS (When Studying)
+      if (!isStormy) {
         ctx.save()
         const rayGrad = ctx.createLinearGradient(winX + 40, winY + 40, winX + 420, floorY + 60)
-        rayGrad.addColorStop(0, 'rgba(254, 240, 138, 0.18)')
-        rayGrad.addColorStop(0.6, 'rgba(253, 224, 71, 0.07)')
-        rayGrad.addColorStop(1, 'rgba(253, 224, 71, 0)')
+        if (skinId === 'tokyo_lofi') {
+          rayGrad.addColorStop(0, 'rgba(244, 114, 182, 0.16)')
+          rayGrad.addColorStop(0.6, 'rgba(168, 85, 247, 0.06)')
+          rayGrad.addColorStop(1, 'rgba(168, 85, 247, 0)')
+        } else {
+          rayGrad.addColorStop(0, 'rgba(254, 240, 138, 0.18)')
+          rayGrad.addColorStop(0.6, 'rgba(253, 224, 71, 0.07)')
+          rayGrad.addColorStop(1, 'rgba(253, 224, 71, 0)')
+        }
         ctx.fillStyle = rayGrad
         ctx.beginPath()
         ctx.moveTo(winX + 10, winY + 30)
@@ -515,7 +556,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       if (hasUpgrade('bookshelf')) {
         const shelfX = 535
         const shelfY = 74
-        ctx.fillStyle = '#5c3a21'
+        ctx.fillStyle = skin.trimColor
         ctx.fillRect(shelfX, shelfY + 42, 165, 8)
         const bookColors = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899']
         let bx = shelfX + 12
@@ -563,7 +604,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       const deskY = floorY - 82
       const deskW = 225
 
-      ctx.fillStyle = isCold ? '#334155' : '#9a3412'
+      ctx.fillStyle = isStormy ? '#334155' : skin.rugColor
       ctx.beginPath()
       ctx.ellipse(deskX + 115, floorY + 34, 155, 24, 0, 0, Math.PI * 2)
       ctx.fill()
@@ -572,7 +613,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
       ctx.stroke()
 
       if (hasUpgrade('sleeping_cat')) {
-        drawSleepingCat(ctx, deskX + 215, floorY + 26, t, isCold)
+        drawSleepingCat(ctx, deskX + 215, floorY + 26, t, isStormy)
       }
 
       ctx.fillStyle = '#1e293b'
@@ -585,13 +626,20 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         roommateState === 'shivering' ||
         roommateState === 'glaring_with_clipboard'
       ) {
-        drawRoommateCharacter(ctx, deskX + 106, deskY - 22, roommateState, t, comebackProgress)
+        drawRoommateCharacter(
+          ctx,
+          deskX + 106,
+          deskY - 22,
+          roommateState,
+          t,
+          skin.sweaterColor
+        )
       }
 
-      ctx.fillStyle = '#451a03'
+      ctx.fillStyle = '#271206'
       ctx.fillRect(deskX + 14, deskY + 12, 10, 74)
       ctx.fillRect(deskX + deskW - 24, deskY + 12, 10, 74)
-      ctx.fillStyle = '#78350f'
+      ctx.fillStyle = skin.deskColor
       ctx.beginPath()
       ctx.roundRect(deskX, deskY, deskW, 14, 4)
       ctx.fill()
@@ -622,7 +670,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         ctx.closePath()
         ctx.fill()
 
-        if (focusMode === 'locked_in' || focusMode === 'golden_comeback') {
+        if (!isStormy) {
           const cone = ctx.createRadialGradient(lampX, lampY - 28, 4, lampX, lampY - 10, 75)
           cone.addColorStop(0, 'rgba(253, 224, 71, 0.45)')
           cone.addColorStop(1, 'rgba(253, 224, 71, 0)')
@@ -640,7 +688,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
         ctx.beginPath()
         ctx.roundRect(mugX, mugY, 16, 14, 2)
         ctx.fill()
-        if (!isCold) {
+        if (!isStormy) {
           ctx.strokeStyle = 'rgba(255,255,255,0.45)'
           ctx.lineWidth = 1.4
           for (let s = 0; s < 2; s++) {
@@ -667,7 +715,7 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
           floorY - 36,
           roommateState,
           t,
-          comebackProgress
+          skin.sweaterColor
         )
       } else if (roommateState === 'painting_golden_leaf') {
         drawRoommateCharacter(
@@ -676,14 +724,14 @@ export const StudioCanvas: React.FC<StudioCanvasProps> = (props) => {
           floorY - 62,
           roommateState,
           t,
-          comebackProgress
+          skin.sweaterColor
         )
       }
 
       // 11. SPEECH BUBBLE OVERLAY
       drawSpeechBubble(ctx, dialogueText, roommateState, W)
 
-      // 12. TOP-LEFT LIVE ENVIRONMENT HUD PILL + LIVE LEAF SPROUT PROGRESS BAR
+      // 12. TOP-LEFT LIVE ENVIRONMENT HUD PILL
       drawCanvasHud(ctx, focusMode, roomTempCelsius, leaves, comebackProgress, nextLeafProgress)
 
       animId = requestAnimationFrame(render)
@@ -739,7 +787,6 @@ function drawProceduralLeaf(
   ctx.strokeStyle = stroke
   ctx.lineWidth = 1.8
 
-  // Heart-shaped botanical ivy leaf via Bézier curves
   ctx.beginPath()
   ctx.moveTo(0, -sz * 0.85)
   ctx.bezierCurveTo(sz * 0.95, -sz * 0.65, sz * 1.1, sz * 0.35, 0, sz * 1.05)
@@ -747,7 +794,6 @@ function drawProceduralLeaf(
   ctx.fill()
   ctx.stroke()
 
-  // Central & side leaf veins
   ctx.strokeStyle = h > 0.5 ? '#bbf7d0' : '#a16207'
   ctx.lineWidth = 1.1
   ctx.beginPath()
@@ -759,7 +805,6 @@ function drawProceduralLeaf(
   ctx.lineTo(-sz * 0.45, -sz * 0.05)
   ctx.stroke()
 
-  // Glowing Blossom at node when healthy & blooming
   if (leaf.hasBlossom && h > 0.65 && leaf.status === 'attached') {
     const pulse = 1 + Math.sin(t * 3.5 + leaf.id) * 0.1
     ctx.save()
@@ -789,7 +834,7 @@ function drawRoommateCharacter(
   y: number,
   state: RoommateState,
   t: number,
-  _comebackProgress: number
+  sweaterColor: string
 ) {
   ctx.save()
   ctx.translate(x, y)
@@ -821,7 +866,7 @@ function drawRoommateCharacter(
     ctx.lineTo(20, 14)
     ctx.stroke()
   } else {
-    ctx.fillStyle = state === 'painting_golden_leaf' ? '#7c2d12' : '#059669'
+    ctx.fillStyle = state === 'painting_golden_leaf' ? '#7c2d12' : sweaterColor
     ctx.beginPath()
     ctx.roundRect(-17, -6, 34, 30, 9)
     ctx.fill()
@@ -1139,7 +1184,6 @@ function drawCanvasHud(
     27
   )
 
-  // Compact Next-Leaf Progress Bar
   const barX = 185
   const barY = 16
   const barW = 144

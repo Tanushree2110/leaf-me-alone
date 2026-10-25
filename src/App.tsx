@@ -1,15 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Camera,
+  Check,
   CheckCircle2,
   ChevronDown,
-  ChevronUp,
-  ClipboardList,
-  CloudRain,
   Coffee,
   FastForward,
   Layers,
   Leaf,
+  Palette,
   Pause,
   Play,
   RotateCcw,
@@ -19,7 +18,6 @@ import {
   Sun,
   ThermometerSnowflake,
   Timer,
-  Video,
   Volume2,
   VolumeX,
   Wand2,
@@ -32,6 +30,7 @@ import {
   FocusMode,
   LeafNode,
   RoommateState,
+  RoomSkinId,
   RoomUpgrade,
   SessionStats,
   VineSegment,
@@ -42,6 +41,7 @@ import {
   PHONE_DETECTED_QUOTES,
   pickRandomDialogue,
 } from './utils/dialogue'
+import { ROOM_SKINS } from './utils/skins'
 import { soundFX } from './utils/sound'
 import { StudioCanvas } from './components/StudioCanvas'
 import { PolaroidModal } from './components/PolaroidModal'
@@ -49,7 +49,7 @@ import { WebcamGuard } from './components/WebcamGuard'
 import { AllowedTabsManager } from './components/AllowedTabsManager'
 import { PomodoroConfig, PomodoroPanel } from './components/PomodoroPanel'
 
-type ExpandablePanel = 'pomodoro' | 'tabs' | 'upgrades' | 'log' | 'demo' | null
+type ExpandablePanel = 'pomodoro' | 'tabs' | 'upgrades' | 'demo' | null
 
 function generateProceduralVineSegments(): VineSegment[] {
   const points = [
@@ -148,6 +148,7 @@ export function App() {
 
   const [focusMode, setFocusMode] = useState<FocusMode>('locked_in')
   const [roommateState, setRoommateState] = useState<RoommateState>('typing')
+  const [skinId, setSkinId] = useState<RoomSkinId>('cozy_greenhouse')
   const [leaves, setLeaves] = useState<LeafNode[]>(() => createInitialLeaves(vineSegments))
   const [vineGrowthProgress, setVineGrowthProgress] = useState<number>(0.38)
   const [nextLeafProgress, setNextLeafProgress] = useState<number>(0.1)
@@ -157,11 +158,10 @@ export function App() {
     'Headphones on. Deep work mode engaged—watch the ivy climb!'
   )
 
-  // Sound & Cozy Lo-Fi Rain state
+  // Sound state (controls serene studying music + rough lightning storm audio)
   const [soundEnabled, setSoundEnabled] = useState<boolean>(true)
-  const [ambientRainOn, setAmbientRainOn] = useState<boolean>(false)
 
-  // Opt-In Customizable Pomodoro State (with Break -> Stop Until Next Session)
+  // Opt-In Customizable Pomodoro State
   const [pomodoro, setPomodoro] = useState<PomodoroConfig>({
     enabled: true,
     isRunning: true,
@@ -174,22 +174,20 @@ export function App() {
   })
   const leafAccumulatorSecRef = useRef<number>(0)
 
-  // Minimal Popovers (all closed by default; webcam collapsed into sleek pill by default)
+  // Minimal Popovers
   const [activePanel, setActivePanel] = useState<ExpandablePanel>(null)
   const [isPolaroidOpen, setIsPolaroidOpen] = useState<boolean>(false)
-  const [isWebcamExpanded, setIsWebcamExpanded] = useState<boolean>(false)
 
   // Webcam Guard State
   const [webcamEnabled, setWebcamEnabled] = useState<boolean>(true)
   const [cameraStatus, setCameraStatus] = useState<CameraStatus>('initializing')
 
-  // Chrome Tabs State (no fake Cursor/Docs placeholders!)
+  // Chrome Tabs State
   const [allowedTabs, setAllowedTabs] = useState<AllowedTab[]>(() => loadSavedChromeTabs())
   const [isWhitelistLocked, setIsWhitelistLocked] = useState<boolean>(false)
   const [activeAllowedTabId, setActiveAllowedTabId] = useState<string | null>('tab-current')
   const [extensionConnected, setExtensionConnected] = useState<boolean>(false)
 
-  // Save allowed tabs to localStorage whenever updated
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY_TABS, JSON.stringify(allowedTabs))
@@ -213,17 +211,7 @@ export function App() {
     speedMultiplier: 1,
   })
 
-  const [activityLog, setActivityLog] = useState<ActivityLogItem[]>([
-    {
-      id: 'init-1',
-      timestamp: new Date().toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-      }),
-      type: 'focus',
-      message: 'Session started in Chrome.',
-    },
-  ])
+  const [, setActivityLog] = useState<ActivityLogItem[]>([])
 
   const appendLog = useCallback(
     (type: ActivityLogItem['type'], message: string, quote?: string) => {
@@ -241,6 +229,30 @@ export function App() {
     },
     []
   )
+
+  // Determine whether rough storm weather + lightning audio should be active!
+  const isRoughWeather =
+    focusMode === 'distracted' ||
+    focusMode === 'last_leaf_climax' ||
+    cameraStatus === 'phone_detected' ||
+    cameraStatus === 'away_detected'
+
+  // Sync Background Music (Serene Music when Studying vs Rough Lightning Storm when Not Studying)
+  useEffect(() => {
+    if (!soundEnabled) {
+      soundFX.setMood('silent')
+      return
+    }
+    if (pomodoro.enabled && pomodoro.phase === 'awaiting_next_session') {
+      soundFX.setMood('silent')
+      return
+    }
+    if (isRoughWeather) {
+      soundFX.setMood('storm')
+    } else {
+      soundFX.setMood('studying')
+    }
+  }, [soundEnabled, isRoughWeather, pomodoro.enabled, pomodoro.phase])
 
   const togglePanel = (panel: ExpandablePanel) => {
     soundFX.playSoftClick()
@@ -307,14 +319,13 @@ export function App() {
     setStats((s) => ({ ...s, leavesGrown: s.leavesGrown + 1 }))
   }, [vineSegments])
 
-  // Trigger a distraction event
+  // Trigger a distraction event -> drops a leaf + switches weather to rough storm & lightning!
   const triggerDistraction = useCallback(
     (
       reason = 'Unapproved tab switch',
       customQuotes?: string[],
       logType: ActivityLogItem['type'] = 'distraction'
     ) => {
-      // Never penalize during Pomodoro Break or when game is stopped between sessions!
       if (
         pomodoro.enabled &&
         (pomodoro.phase === 'break' ||
@@ -401,7 +412,7 @@ export function App() {
     [appendLog, vineSegments, pomodoro.enabled, pomodoro.phase, pomodoro.isRunning]
   )
 
-  // Listen to Chrome Extension postMessage events (instant real-time sync inside Chrome!)
+  // Listen to Chrome Extension postMessage events
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== window || !event.data) return
@@ -436,7 +447,6 @@ export function App() {
             }))
           )
         } else if (isWhitelistLocked) {
-          // Keep titles & URLs of allowed root tabs and expanded sub-tabs up to date!
           setAllowedTabs((prev) =>
             prev.map((item) => {
               const liveMatch = liveTabs.find(
@@ -463,17 +473,14 @@ export function App() {
           newTab.url.startsWith('edge://newtab')
 
         setAllowedTabs((prev) => {
-          // Already tracked?
           if (prev.some((p) => String(p.chromeTabId) === String(newTab.chromeTabId))) {
             return prev
           }
 
-          // Check if opened from an initial allowed tab (or from an already-allowed sub-tab)
           const openerParent = prev.find(
             (p) => p.chromeTabId && String(p.chromeTabId) === String(newTab.openerTabId)
           )
 
-          // If opened via a link from an allowed tab (not pressing Cmd+T for a blank newtab) -> ALLOW & EXPAND!
           if (openerParent && !isBlankNewTab) {
             const rootParentId = openerParent.parentId || openerParent.id
             appendLog(
@@ -492,7 +499,6 @@ export function App() {
             ]
           }
 
-          // Otherwise it's an unapproved standalone new tab!
           triggerDistraction(
             `Opened unapproved new tab "${newTab.title || 'New Tab'}" outside initial tabs!`
           )
@@ -502,7 +508,6 @@ export function App() {
     }
 
     window.addEventListener('message', handleMessage)
-    // Automatically request open Chrome tabs on mount and every 3s
     window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
     const syncTimer = setInterval(() => {
       window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
@@ -540,7 +545,7 @@ export function App() {
     }
   }
 
-  // Existing tabs are SAFE to switch between; only rapid doomscroll tab-hopping (4+ in 15s) penalizes
+  // Existing tabs are SAFE to switch between; rapid doomscroll tab-hopping (4+ in 15s) triggers storm + leaf drop
   useEffect(() => {
     const handleVisibility = () => {
       if (document.hidden) {
@@ -576,7 +581,7 @@ export function App() {
     if (focusMode === 'distracted') {
       setFocusMode('locked_in')
       setRoommateState('typing')
-      setDialogueText('Eyes back on screen! Resuming deep work.')
+      setDialogueText('Eyes back on screen! Storm clearing—resuming deep work.')
     }
   }, [focusMode])
 
@@ -660,7 +665,6 @@ export function App() {
     return 180
   }, [pomodoro.enabled, pomodoro.focusMinutes, pomodoro.leavesPerCycle])
 
-  // Start the next Pomodoro session after a Break has finished and stopped the game
   const handleStartNextSession = useCallback(() => {
     soundFX.playPomodoroBell()
     leafAccumulatorSecRef.current = 0
@@ -684,7 +688,6 @@ export function App() {
     const timer = setInterval(() => {
       const delta = stats.speedMultiplier
 
-      // If Pomodoro is enabled and either paused OR stopped awaiting next session, do nothing!
       if (
         pomodoro.enabled &&
         (!pomodoro.isRunning || pomodoro.phase === 'awaiting_next_session')
@@ -697,13 +700,11 @@ export function App() {
           const nextRem = prev.remainingSeconds - delta
           if (nextRem <= 0) {
             if (prev.phase === 'focus') {
-              // Focus block finished -> Start Pomodoro Break
               soundFX.playGoldenFanfare()
               sproutOneLeaf()
               setDialogueText(
                 `Focus complete! Enjoy your ${prev.breakMinutes}m break—game will stop automatically when break ends.`
               )
-              appendLog('focus', `Focus complete! Started ${prev.breakMinutes}m Break.`)
               return {
                 ...prev,
                 phase: 'break',
@@ -711,14 +712,9 @@ export function App() {
                 completedCycles: prev.completedCycles + 1,
               }
             } else if (prev.phase === 'break') {
-              // Break finished -> STOP GAME UNTIL NEXT POMODORO SESSION BEGINS!
               soundFX.playPomodoroBell()
               setDialogueText(
                 'Pomodoro break complete! Game is paused until you start your next Pomodoro session.'
-              )
-              appendLog(
-                'focus',
-                'Break finished. Game stopped awaiting next Pomodoro session.'
               )
               return {
                 ...prev,
@@ -732,7 +728,6 @@ export function App() {
         })
       }
 
-      // During break, pause leaf growth & penalties
       if (pomodoro.enabled && pomodoro.phase !== 'focus') return
 
       const isCameraFocusedOrTyping =
@@ -782,9 +777,7 @@ export function App() {
             setFocusMode('golden_comeback')
             setRoommateState('painting_golden_leaf')
             sproutOneLeaf()
-            const quote = pickRandomDialogue('painting_golden_leaf')
-            setDialogueText(quote)
-            appendLog('redemption', 'Painted a permanent Golden Leaf on the brick wall!')
+            setDialogueText(pickRandomDialogue('painting_golden_leaf'))
             return {
               ...prev,
               focusSeconds: prev.focusSeconds + delta,
@@ -815,7 +808,6 @@ export function App() {
     pomodoro.phase,
     targetSecondsPerLeaf,
     sproutOneLeaf,
-    appendLog,
   ])
 
   // Unlock cozy studio upgrades automatically
@@ -831,13 +823,11 @@ export function App() {
         return u
       })
       if (newlyUnlocked) {
-        const upg = newlyUnlocked as RoomUpgrade
         soundFX.playLeafSprout()
-        appendLog('upgrade', `Unlocked ${upg.name}!`)
       }
       return newlyUnlocked ? updated : prev
     })
-  }, [stats.focusSeconds, appendLog])
+  }, [stats.focusSeconds])
 
   const handleLockInAndSprout = () => {
     setFocusMode('locked_in')
@@ -997,7 +987,7 @@ export function App() {
           )}
         </div>
 
-        {/* Right: Clean Icon/Label Controls */}
+        {/* Right: Clean Controls (Tabs, Room Skins & Upgrades, Sound, Demo, Polaroid) */}
         <div className="flex items-center gap-1.5 font-mono text-xs">
           <button
             onClick={() => togglePanel('tabs')}
@@ -1019,46 +1009,27 @@ export function App() {
                 : 'border-stone-800 bg-stone-900 text-stone-300 hover:bg-stone-800'
             }`}
           >
-            <Layers className="h-3.5 w-3.5 text-amber-400" />
-            <span className="hidden sm:inline">Room ({unlockedUpgradesCount}/5)</span>
+            <Palette className="h-3.5 w-3.5 text-amber-400" />
+            <span className="hidden sm:inline">Room &amp; Skins</span>
           </button>
 
-          {/* Clear "Rain" Label on the Lo-Fi Rain Ambient Button */}
-          <button
-            onClick={() => {
-              if (!soundEnabled) {
-                setSoundEnabled(true)
-                soundFX.setEnabled(true)
-              }
-              const playing = soundFX.toggleAmbientRain()
-              setAmbientRainOn(playing)
-            }}
-            className={`flex items-center gap-1 rounded-lg border px-2.5 py-1 font-semibold transition ${
-              ambientRainOn
-                ? 'border-sky-500/50 bg-sky-500/20 text-sky-200'
-                : 'border-stone-800 bg-stone-900 text-stone-400 hover:bg-stone-800 hover:text-stone-200'
-            }`}
-            title="Cozy Lo-Fi Rain Ambient Sound"
-          >
-            <CloudRain className="h-3.5 w-3.5 text-sky-400" />
-            <span className="hidden md:inline">Rain</span>
-          </button>
-
-          {/* Sound Effects Mute/Unmute */}
+          {/* Mood Music & Storm Audio Toggle */}
           <button
             onClick={() => {
               const next = !soundEnabled
               setSoundEnabled(next)
               soundFX.setEnabled(next)
-              if (next) soundFX.playSoftClick()
-              else setAmbientRainOn(false)
             }}
             className={`rounded-lg border p-1.5 transition ${
               soundEnabled
                 ? 'border-stone-800 bg-stone-900 text-emerald-400 hover:bg-stone-800'
                 : 'border-stone-800 bg-stone-900 text-stone-500'
             }`}
-            title={soundEnabled ? 'Sound Effects: ON' : 'Muted'}
+            title={
+              soundEnabled
+                ? 'Mood Audio ON (Serene Study Music / Storm Thunder)'
+                : 'Audio Muted'
+            }
           >
             {soundEnabled ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
           </button>
@@ -1096,6 +1067,8 @@ export function App() {
           <StudioCanvas
             focusMode={focusMode}
             roommateState={roommateState}
+            skinId={skinId}
+            isRoughWeather={isRoughWeather}
             leaves={leaves}
             vineSegments={vineSegments}
             vineGrowthProgress={vineGrowthProgress}
@@ -1106,7 +1079,6 @@ export function App() {
             roomTempCelsius={stats.roomTempCelsius}
             comebackProgress={comebackProgress}
             dialogueText={dialogueText}
-            ambientRainOn={ambientRainOn}
             canvasRef={studioCanvasRef}
           />
         </div>
@@ -1136,7 +1108,7 @@ export function App() {
           </div>
         )}
 
-        {/* ALWAYS-MOUNTED LIVE WEBCAM GUARD (Bottom-Left Corner) */}
+        {/* ALWAYS-MOUNTED LIVE WEBCAM GUARD (Bottom-Left Corner: Clean Green/Red + Line Adjust Buttons) */}
         <div className="absolute bottom-4 left-4 z-20">
           <WebcamGuard
             enabled={webcamEnabled}
@@ -1146,8 +1118,6 @@ export function App() {
             onPhoneDetected={handlePhoneDetected}
             onAwayDetected={handleAwayDetected}
             onBackFocused={handleCameraBackFocused}
-            isExpanded={isWebcamExpanded}
-            onToggleExpanded={() => setIsWebcamExpanded((v) => !v)}
           />
         </div>
 
@@ -1158,9 +1128,8 @@ export function App() {
               <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-emerald-400">
                 {activePanel === 'pomodoro' && 'Pomodoro & Break'}
                 {activePanel === 'tabs' && 'Allowed Chrome Tabs'}
-                {activePanel === 'upgrades' && 'Room Upgrades'}
+                {activePanel === 'upgrades' && 'Room Skins & Upgrades'}
                 {activePanel === 'demo' && 'Story Simulator'}
-                {activePanel === 'log' && 'Clipboard Log'}
               </span>
               <button
                 onClick={() => setActivePanel(null)}
@@ -1204,7 +1173,6 @@ export function App() {
                         completedCycles: prev.completedCycles + 1,
                       }
                     }
-                    // Skipping/finishing break stops the game until next session!
                     return {
                       ...prev,
                       phase: 'awaiting_next_session',
@@ -1236,41 +1204,88 @@ export function App() {
             )}
 
             {activePanel === 'upgrades' && (
-              <div className="space-y-1.5 font-mono text-xs">
-                <div className="flex justify-end pb-1">
-                  <button
-                    onClick={() => {
-                      soundFX.playLeafSprout()
-                      setUpgrades((prev) => prev.map((u) => ({ ...u, unlocked: true })))
-                    }}
-                    className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-300"
-                  >
-                    Unlock All
-                  </button>
-                </div>
-                {upgrades.map((u) => (
-                  <div
-                    key={u.id}
-                    onClick={() => {
-                      soundFX.playSoftClick()
-                      setUpgrades((prev) =>
-                        prev.map((item) =>
-                          item.id === u.id ? { ...item, unlocked: !item.unlocked } : item
-                        )
-                      )
-                    }}
-                    className={`flex cursor-pointer items-center justify-between rounded-lg border px-2.5 py-1.5 transition ${
-                      u.unlocked
-                        ? 'border-emerald-500/40 bg-emerald-950/30 text-stone-100'
-                        : 'border-stone-800 bg-stone-950/60 text-stone-500'
-                    }`}
-                  >
-                    <span className="text-[11px] font-bold">{u.name}</span>
-                    <span className="text-[10px] text-emerald-400">
-                      {u.unlocked ? 'ON' : `${u.unlockMinutes}m`}
-                    </span>
+              <div className="space-y-3 font-mono text-xs max-h-80 overflow-y-auto pr-0.5">
+                {/* 5 Selectable Studio Room Skins */}
+                <div>
+                  <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-bold uppercase text-amber-400">
+                    <Palette className="h-3 w-3" /> Studio Room Skin (5 Themes)
                   </div>
-                ))}
+                  <div className="space-y-1">
+                    {ROOM_SKINS.map((s) => (
+                      <button
+                        key={s.id}
+                        onClick={() => {
+                          soundFX.playSoftClick()
+                          setSkinId(s.id)
+                        }}
+                        className={`flex w-full items-center justify-between rounded-lg border px-2.5 py-1.5 text-left transition ${
+                          skinId === s.id
+                            ? 'border-amber-400 bg-amber-500/15 text-stone-100'
+                            : 'border-stone-800 bg-stone-950/70 text-stone-400 hover:text-stone-200'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className="h-3 w-3 rounded-full shrink-0"
+                            style={{ backgroundColor: s.previewColor }}
+                          />
+                          <div className="truncate">
+                            <div className="text-[11px] font-bold">{s.name}</div>
+                            <div className="truncate text-[9px] text-stone-500">
+                              {s.subtitle}
+                            </div>
+                          </div>
+                        </div>
+                        {skinId === s.id && (
+                          <Check className="h-3.5 w-3.5 text-amber-400 shrink-0" />
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Furniture Upgrades */}
+                <div className="border-t border-stone-800 pt-2">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <span className="flex items-center gap-1 text-[10px] font-bold uppercase text-emerald-400">
+                      <Layers className="h-3 w-3" /> Furniture ({unlockedUpgradesCount}/5)
+                    </span>
+                    <button
+                      onClick={() => {
+                        soundFX.playLeafSprout()
+                        setUpgrades((prev) => prev.map((u) => ({ ...u, unlocked: true })))
+                      }}
+                      className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[9.5px] font-bold text-amber-300"
+                    >
+                      Unlock All
+                    </button>
+                  </div>
+                  <div className="space-y-1">
+                    {upgrades.map((u) => (
+                      <div
+                        key={u.id}
+                        onClick={() => {
+                          soundFX.playSoftClick()
+                          setUpgrades((prev) =>
+                            prev.map((item) =>
+                              item.id === u.id ? { ...item, unlocked: !item.unlocked } : item
+                            )
+                          )
+                        }}
+                        className={`flex cursor-pointer items-center justify-between rounded-lg border px-2.5 py-1.5 transition ${
+                          u.unlocked
+                            ? 'border-emerald-500/40 bg-emerald-950/30 text-stone-100'
+                            : 'border-stone-800 bg-stone-950/60 text-stone-500'
+                        }`}
+                      >
+                        <span className="text-[11px] font-bold">{u.name}</span>
+                        <span className="text-[10px] text-emerald-400">
+                          {u.unlocked ? 'ON' : `${u.unlockMinutes}m`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             )}
 
@@ -1284,10 +1299,10 @@ export function App() {
                     <Sun className="h-3.5 w-3.5" /> +1 Leaf
                   </button>
                   <button
-                    onClick={() => triggerDistraction('Simulated Distraction')}
+                    onClick={() => triggerDistraction('Opened unapproved tab!')}
                     className="flex items-center gap-1 rounded-lg border border-orange-500/40 bg-orange-950/50 p-2 text-[11px] font-bold text-orange-300"
                   >
-                    <ThermometerSnowflake className="h-3.5 w-3.5" /> Drop Leaf
+                    <ThermometerSnowflake className="h-3.5 w-3.5" /> Storm &amp; Drop
                   </button>
                   <button
                     onClick={handleTriggerLastLeafClimax}
@@ -1336,20 +1351,6 @@ export function App() {
                     <RotateCcw className="h-3 w-3" /> Reset
                   </button>
                 </div>
-              </div>
-            )}
-
-            {activePanel === 'log' && (
-              <div className="max-h-56 space-y-1.5 overflow-y-auto pr-1 font-mono text-[10.5px]">
-                {activityLog.map((item) => (
-                  <div
-                    key={item.id}
-                    className="rounded-lg border border-stone-800 bg-stone-950 p-2 text-stone-300"
-                  >
-                    <span className="text-stone-500">{item.timestamp} · </span>
-                    {item.message}
-                  </div>
-                ))}
               </div>
             )}
           </div>
