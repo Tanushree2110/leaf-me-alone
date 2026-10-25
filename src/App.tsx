@@ -417,12 +417,14 @@ export function App() {
           chromeTabId: number
           title: string
           url: string
+          openerTabId: number | null
           active: boolean
         }>
         const activeLive = liveTabs.find((t) => t.active)
         if (activeLive) {
           setActiveAllowedTabId(`chrome-${activeLive.chromeTabId}`)
         }
+
         if (!isWhitelistLocked && liveTabs.length > 0) {
           setAllowedTabs(
             liveTabs.map((t) => ({
@@ -433,30 +435,67 @@ export function App() {
               isActive: t.active,
             }))
           )
+        } else if (isWhitelistLocked) {
+          // Keep titles & URLs of allowed root tabs and expanded sub-tabs up to date!
+          setAllowedTabs((prev) =>
+            prev.map((item) => {
+              const liveMatch = liveTabs.find(
+                (lt) => String(lt.chromeTabId) === String(item.chromeTabId)
+              )
+              return liveMatch
+                ? { ...item, title: liveMatch.title || item.title, url: liveMatch.url || item.url }
+                : item
+            })
+          )
         }
       }
 
       if (data.type === 'LEAF_CHROME_TAB_CREATED' && data.tab && isWhitelistLocked) {
-        const newTab = data.tab
+        const newTab = data.tab as {
+          chromeTabId: number
+          title: string
+          url: string
+          openerTabId: number | null
+        }
+        const isBlankNewTab =
+          !newTab.url ||
+          newTab.url.startsWith('chrome://newtab') ||
+          newTab.url.startsWith('edge://newtab')
+
         setAllowedTabs((prev) => {
-          const parent = prev.find(
+          // Already tracked?
+          if (prev.some((p) => String(p.chromeTabId) === String(newTab.chromeTabId))) {
+            return prev
+          }
+
+          // Check if opened from an initial allowed tab (or from an already-allowed sub-tab)
+          const openerParent = prev.find(
             (p) => p.chromeTabId && String(p.chromeTabId) === String(newTab.openerTabId)
           )
-          if (parent) {
+
+          // If opened via a link from an allowed tab (not pressing Cmd+T for a blank newtab) -> ALLOW & EXPAND!
+          if (openerParent && !isBlankNewTab) {
+            const rootParentId = openerParent.parentId || openerParent.id
+            appendLog(
+              'tab_whitelist',
+              `Auto-allowed sub-tab "${newTab.title}" opened from "${openerParent.title}"`
+            )
             return [
               ...prev,
               {
                 id: `chrome-${newTab.chromeTabId}`,
                 chromeTabId: newTab.chromeTabId,
-                title: newTab.title || 'Sub-tab',
+                title: newTab.title || 'Expanded Sub-tab',
                 url: newTab.url || '',
-                parentId: parent.id,
+                parentId: rootParentId,
               },
             ]
           }
-          if (newTab.url && !newTab.url.startsWith('chrome://newtab')) {
-            triggerDistraction(`Opened unapproved new Chrome tab "${newTab.title}"`)
-          }
+
+          // Otherwise it's an unapproved standalone new tab!
+          triggerDistraction(
+            `Opened unapproved new tab "${newTab.title || 'New Tab'}" outside initial tabs!`
+          )
           return prev
         })
       }
@@ -473,7 +512,7 @@ export function App() {
       window.removeEventListener('message', handleMessage)
       clearInterval(syncTimer)
     }
-  }, [isWhitelistLocked, triggerDistraction])
+  }, [isWhitelistLocked, triggerDistraction, appendLog])
 
   const handleRequestExtensionSync = () => {
     soundFX.playSoftClick()

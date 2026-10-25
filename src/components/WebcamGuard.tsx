@@ -7,6 +7,7 @@ import {
   ChevronUp,
   Crosshair,
   Keyboard,
+  RefreshCw,
   Smartphone,
   UserX,
 } from 'lucide-react'
@@ -39,8 +40,27 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const analysisCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const prevGrayFrameRef = useRef<Float32Array | null>(null)
 
-  // Smoothed face Y position (0..1 from top of camera frame)
+  // Store callbacks in a ref so the CV interval never restarts when parent state changes!
+  const callbacksRef = useRef({
+    status,
+    onStatusChange,
+    onPhoneDetected,
+    onAwayDetected,
+    onBackFocused,
+  })
+  useEffect(() => {
+    callbacksRef.current = {
+      status,
+      onStatusChange,
+      onPhoneDetected,
+      onAwayDetected,
+      onBackFocused,
+    }
+  }, [status, onStatusChange, onPhoneDetected, onAwayDetected, onBackFocused])
+
+  // Smoothed face Y/X position (0..1 from top of camera frame)
   const smoothedYRef = useRef<number>(0.42)
   const smoothedXRef = useRef<number>(0.5)
   const autoCalibratedRef = useRef<boolean>(false)
@@ -60,7 +80,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   const [belowDurationSec, setBelowDurationSec] = useState<number>(0)
   const [isTypingNow, setIsTypingNow] = useState<boolean>(false)
 
-  // Listen ONLY to physical keyboard keystrokes (not mouse clicks) for the typing shield
+  // Listen ONLY to physical keyboard keystrokes for the typing shield
   useEffect(() => {
     const handleKeyDown = () => {
       lastKeydownMsRef.current = Date.now()
@@ -76,12 +96,15 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       streamRef.current.getTracks().forEach((t) => t.stop())
       streamRef.current = null
     }
-    onStatusChange('off')
-  }, [onStatusChange])
+    callbacksRef.current.onStatusChange('off')
+  }, [])
 
   const startCamera = useCallback(async () => {
-    onStatusChange('initializing')
+    callbacksRef.current.onStatusChange('initializing')
     try {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop())
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         video: { width: 320, height: 240, facingMode: 'user' },
         audio: false,
@@ -89,13 +112,13 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       streamRef.current = stream
       if (videoRef.current) {
         videoRef.current.srcObject = stream
-        await videoRef.current.play()
+        await videoRef.current.play().catch(() => {})
       }
-      onStatusChange('focused')
+      callbacksRef.current.onStatusChange('focused')
     } catch {
-      onStatusChange('permission_denied')
+      callbacksRef.current.onStatusChange('permission_denied')
     }
-  }, [onStatusChange])
+  }, [])
 
   useEffect(() => {
     if (enabled) {
@@ -106,40 +129,56 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     return () => {
       if (streamRef.current) {
         streamRef.current.getTracks().forEach((t) => t.stop())
+        streamRef.current = null
       }
     }
   }, [enabled, startCamera, stopCamera])
 
-  // Click anywhere on the camera preview to place the dashed threshold line right at that height!
+  // Click anywhere on the camera preview to place the dashed threshold line right at that height
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
     const clickY = (e.clientY - rect.top) / rect.height
-    const clamped = Math.max(0.2, Math.min(0.85, +clickY.toFixed(2)))
+    const clamped = Math.max(0.18, Math.min(0.88, +clickY.toFixed(2)))
     setThresholdY(clamped)
     belowLineStartMsRef.current = null
     setBelowDurationSec(0)
   }
 
-  // Calibrate line just below current face position
+  // Snap line just below current face dot
   const handleCalibrateLine = () => {
-    const nextLine = Math.max(0.25, Math.min(0.82, +(smoothedYRef.current + 0.05).toFixed(2)))
+    const nextLine = Math.max(0.22, Math.min(0.85, +(smoothedYRef.current + 0.05).toFixed(2)))
     setThresholdY(nextLine)
     belowLineStartMsRef.current = null
     setBelowDurationSec(0)
-    onStatusChange('focused')
-    onBackFocused()
+    callbacksRef.current.onStatusChange('focused')
+    callbacksRef.current.onBackFocused()
   }
 
+  // Persistent CV loop (never torn down by status updates)
   useEffect(() => {
-    if (!enabled || status === 'off' || status === 'permission_denied') return
+    if (!enabled) return
 
-    // Delay needed below line before dropping a leaf (1.4s so looking below line triggers quickly!)
-    const TRIGGER_SECONDS = 1.4
+    const TRIGGER_SECONDS = 1.2
 
     const interval = setInterval(() => {
       const video = videoRef.current
       const overlay = overlayCanvasRef.current
-      if (!video || video.readyState < 2) return
+      if (!video) return
+
+      // Auto-recover if Chrome paused the video or a track ended
+      const activeStream = streamRef.current
+      if (
+        !activeStream ||
+        activeStream.getVideoTracks().length === 0 ||
+        activeStream.getVideoTracks()[0].readyState === 'ended'
+      ) {
+        startCamera()
+        return
+      }
+      if (video.paused && video.readyState >= 2) {
+        video.play().catch(() => {})
+      }
+      if (video.readyState < 2) return
 
       if (!analysisCanvasRef.current) {
         const c = document.createElement('canvas')
@@ -154,66 +193,85 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       actx.drawImage(video, 0, 0, 64, 48)
       const frame = actx.getImageData(0, 0, 64, 48).data
 
-      // Track the upper-face / skin cluster with cubic weight so head pitch moves the tracking dot strongly
-      const skinPointsY: number[] = []
-      let weightedX = 0
-      let totalWeight = 0
+      // Compute luminance & track facial features (eyes, brows, nose, mouth horizontal edges + skin + motion)
+      // Unlike flat walls, a face has strong horizontal edge contrast + skin warmth in the center column
+      const gray = new Float32Array(64 * 48)
+      for (let i = 0; i < 64 * 48; i++) {
+        const idx = i * 4
+        gray[i] = 0.299 * frame[idx] + 0.587 * frame[idx + 1] + 0.114 * frame[idx + 2]
+      }
 
-      for (let y = 2; y < 46; y++) {
-        for (let x = 8; x < 56; x++) {
-          const idx = (y * 64 + x) * 4
+      const prevGray = prevGrayFrameRef.current
+      prevGrayFrameRef.current = gray
+
+      let weightedY = 0
+      let weightedX = 0
+      let totalFeatureWeight = 0
+      let skinCount = 0
+
+      for (let y = 3; y < 45; y++) {
+        for (let x = 12; x < 52; x++) {
+          const i = y * 64 + x
+          const idx = i * 4
           const r = frame[idx]
           const g = frame[idx + 1]
           const b = frame[idx + 2]
 
-          const isSkin =
-            r > 65 &&
-            g > 35 &&
-            b > 15 &&
-            r > g &&
-            r > b &&
-            r - g > 7 &&
-            r - b > 12
+          // Horizontal edge strength (captures eyes, eyebrows, hairline, glasses, nose, mouth)
+          const vGrad = Math.abs(gray[i] - gray[(y - 2) * 64 + x])
+          // Motion strength
+          const motion = prevGray ? Math.abs(gray[i] - prevGray[i]) : 0
 
-          if (isSkin) {
-            const centerBias = 1 - Math.abs(x - 32) / 32
-            const w = 1 + centerBias * 1.5
-            skinPointsY.push(y / 48)
+          // Warm skin likelihood
+          const isSkin =
+            r > 60 && g > 30 && b > 15 && r >= g && r > b && r - b > 10
+
+          if (isSkin) skinCount++
+
+          if (vGrad > 14 || motion > 10) {
+            const centerBias = 1.2 - Math.abs(x - 32) / 28
+            const skinBoost = isSkin ? 2.2 : 0.8
+            const motionBoost = motion > 10 ? 1.8 : 1.0
+            const w = (vGrad + motion * 1.5) * centerBias * skinBoost * motionBoost
+
+            weightedY += (y / 48) * w
             weightedX += (x / 64) * w
-            totalWeight += w
+            totalFeatureWeight += w
           }
         }
       }
 
-      const presenceRatio = totalWeight / (48 * 48)
-      const isAway = skinPointsY.length < 18 || presenceRatio < 0.018
+      const isAway = skinCount < 14 && totalFeatureWeight < 450
 
-      if (!isAway && skinPointsY.length > 0) {
-        skinPointsY.sort((a, b) => a - b)
-        // Use the 30th percentile (forehead / eyes / nose bridge) + 70th percentile (chin)
-        // When you tilt your head down, both forehead and chin shift down significantly
-        const p30 = skinPointsY[Math.floor(skinPointsY.length * 0.3)]
-        const p75 = skinPointsY[Math.floor(skinPointsY.length * 0.75)]
-        const rawFaceY = p30 * 0.55 + p75 * 0.45
-        const rawFaceX = weightedX / totalWeight
+      if (!isAway && totalFeatureWeight > 0) {
+        const rawY = weightedY / totalFeatureWeight
+        const rawX = weightedX / totalFeatureWeight
 
-        smoothedYRef.current = smoothedYRef.current * 0.55 + rawFaceY * 0.45
-        smoothedXRef.current = smoothedXRef.current * 0.6 + rawFaceX * 0.4
+        smoothedYRef.current = smoothedYRef.current * 0.45 + rawY * 0.55
+        smoothedXRef.current = smoothedXRef.current * 0.5 + rawX * 0.5
 
         if (!autoCalibratedRef.current) {
           autoCalibratedRef.current = true
-          const initialLine = Math.max(0.28, Math.min(0.78, +(rawFaceY + 0.055).toFixed(2)))
+          const initialLine = Math.max(0.25, Math.min(0.78, +(rawY + 0.05).toFixed(2)))
           setThresholdY(initialLine)
         }
       }
 
       const now = Date.now()
-      const typingActive = now - lastKeydownMsRef.current < 2200
+      const typingActive = now - lastKeydownMsRef.current < 2000
       setIsTypingNow(typingActive)
 
       const currentFaceY = smoothedYRef.current
       const currentLineY = thresholdYRef.current
       const isBelowLine = !isAway && currentFaceY > currentLineY
+
+      const {
+        status: curStatus,
+        onStatusChange: cbStatus,
+        onPhoneDetected: cbPhone,
+        onAwayDetected: cbAway,
+        onBackFocused: cbFocused,
+      } = callbacksRef.current
 
       if (isAway) {
         if (!awayStartMsRef.current) awayStartMsRef.current = now
@@ -222,49 +280,46 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
 
         const awaySec = (now - awayStartMsRef.current) / 1000
         if (awaySec >= 2.2) {
-          onStatusChange('away_detected')
-          if (now - lastAlertTimeRef.current > 4000) {
+          if (curStatus !== 'away_detected') cbStatus('away_detected')
+          if (now - lastAlertTimeRef.current > 3800) {
             lastAlertTimeRef.current = now
-            onAwayDetected()
+            cbAway()
           }
         }
       } else if (isBelowLine) {
         awayStartMsRef.current = null
 
         if (typingActive) {
-          // Typing on physical keyboard: safe!
           belowLineStartMsRef.current = null
           setBelowDurationSec(0)
-          onStatusChange('keyboard_glance')
-          onBackFocused()
+          if (curStatus !== 'keyboard_glance') cbStatus('keyboard_glance')
+          cbFocused()
         } else {
           if (!belowLineStartMsRef.current) belowLineStartMsRef.current = now
           const elapsed = (now - belowLineStartMsRef.current) / 1000
           setBelowDurationSec(elapsed)
 
           if (elapsed >= TRIGGER_SECONDS) {
-            onStatusChange('phone_detected')
-            // Drop a leaf immediately on crossing, and drop another leaf every 3.8s while staying below line!
-            if (now - lastAlertTimeRef.current > 3800) {
+            if (curStatus !== 'phone_detected') cbStatus('phone_detected')
+            if (now - lastAlertTimeRef.current > 3200) {
               lastAlertTimeRef.current = now
-              onPhoneDetected()
+              cbPhone()
             }
           } else {
-            onStatusChange('keyboard_glance')
+            if (curStatus !== 'keyboard_glance') cbStatus('keyboard_glance')
           }
         }
       } else {
-        // Above the line -> Focused!
         awayStartMsRef.current = null
         belowLineStartMsRef.current = null
         setBelowDurationSec(0)
-        if (status !== 'focused') {
-          onStatusChange('focused')
-          onBackFocused()
+        if (curStatus !== 'focused') {
+          cbStatus('focused')
+          cbFocused()
         }
       }
 
-      // Draw live HUD on overlay canvas: Threshold Line + Face Tracking Dot & Box
+      // Draw live HUD on overlay canvas
       if (overlay) {
         const octx = overlay.getContext('2d')
         if (octx) {
@@ -274,10 +329,9 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
 
           const linePx = currentLineY * H
 
-          // Shade danger zone below the line
           octx.fillStyle = isBelowLine
-            ? 'rgba(244, 63, 94, 0.24)'
-            : 'rgba(15, 23, 42, 0.28)'
+            ? 'rgba(244, 63, 94, 0.28)'
+            : 'rgba(15, 23, 42, 0.25)'
           octx.fillRect(0, linePx, W, H - linePx)
 
           // Dashed Threshold Line
@@ -299,12 +353,11 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
                 : '#f43f5e'
               : '#10b981'
 
-            // Outer reticle box
             octx.strokeStyle = color
             octx.lineWidth = 2
-            octx.strokeRect(rx - 18, ry - 18, 36, 36)
+            octx.strokeRect(rx - 16, ry - 16, 32, 32)
 
-            // Center tracking dot (when this dot crosses below the dashed line, leaf drops!)
+            // Center dot that triggers leaf drop as soon as it crosses below the dashed line
             octx.fillStyle = color
             octx.beginPath()
             octx.arc(rx, ry, 4.5, 0, Math.PI * 2)
@@ -312,17 +365,10 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           }
         }
       }
-    }, 180)
+    }, 150)
 
     return () => clearInterval(interval)
-  }, [
-    enabled,
-    status,
-    onStatusChange,
-    onPhoneDetected,
-    onAwayDetected,
-    onBackFocused,
-  ])
+  }, [enabled, startCamera])
 
   return (
     <div className="flex flex-col rounded-xl border border-stone-700/90 bg-stone-900/95 p-2 shadow-2xl backdrop-blur-md">
@@ -332,18 +378,18 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           <Camera className="h-3.5 w-3.5 text-emerald-400" />
           {status === 'phone_detected' ? (
             <span className="flex items-center gap-1 text-rose-400 animate-pulse">
-              <Smartphone className="h-3 w-3" /> BELOW LINE · DROPPING LEAF!
+              <Smartphone className="h-3 w-3" /> BELOW LINE · LEAF DROPPED!
             </span>
           ) : status === 'away_detected' ? (
             <span className="flex items-center gap-1 text-amber-400 animate-pulse">
-              <UserX className="h-3 w-3" /> AWAY FROM DESK!
+              <UserX className="h-3 w-3" /> AWAY!
             </span>
           ) : status === 'keyboard_glance' ? (
             <span className="flex items-center gap-1 text-sky-300">
               <Keyboard className="h-3 w-3" />{' '}
               {isTypingNow
                 ? 'TYPING (SAFE)'
-                : `BELOW LINE (${Math.max(0, 1.4 - belowDurationSec).toFixed(1)}s)`}
+                : `BELOW LINE (${Math.max(0, 1.2 - belowDurationSec).toFixed(1)}s)`}
             </span>
           ) : (
             <span className="flex items-center gap-1 text-emerald-400">
@@ -352,20 +398,33 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
           )}
         </div>
 
-        <button
-          onClick={onToggleExpanded}
-          className="rounded p-0.5 text-stone-400 hover:bg-stone-800 hover:text-white"
-          title={isExpanded ? 'Collapse controls' : 'Expand camera controls'}
-        >
-          {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronUp className="h-3.5 w-3.5" />}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={startCamera}
+            className="rounded p-0.5 text-stone-400 hover:bg-stone-800 hover:text-white"
+            title="Restart Camera"
+          >
+            <RefreshCw className="h-3 w-3" />
+          </button>
+          <button
+            onClick={onToggleExpanded}
+            className="rounded p-0.5 text-stone-400 hover:bg-stone-800 hover:text-white"
+            title={isExpanded ? 'Collapse controls' : 'Expand camera controls'}
+          >
+            {isExpanded ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronUp className="h-3.5 w-3.5" />
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Always-mounted Live Video + Click-to-Set-Line Canvas */}
       <div className="flex items-center gap-2">
         <div
           className={`relative overflow-hidden rounded-lg border bg-stone-950 ${
-            isExpanded ? 'h-24 w-32' : 'h-16 w-24'
+            isExpanded ? 'h-24 w-32' : 'h-20 w-28'
           } shrink-0 transition-all ${
             status === 'phone_detected'
               ? 'border-rose-500 ring-2 ring-rose-500/50'
@@ -376,6 +435,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         >
           <video
             ref={videoRef}
+            autoPlay
             muted
             playsInline
             className={`h-full w-full object-cover -scale-x-100 ${
@@ -406,34 +466,30 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             <button
               onClick={handleCalibrateLine}
               className="flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-950/60 px-2 py-1 font-bold text-emerald-200 hover:bg-emerald-900/60"
-              title="Snap dashed line just below your current face position"
             >
               <Crosshair className="h-3 w-3 text-emerald-400" />
-              Snap Line Below Face
+              Snap Line Below Dot
             </button>
 
             <div className="flex items-center gap-1">
               <button
-                onClick={() => setThresholdY((v) => Math.max(0.2, +(v - 0.04).toFixed(2)))}
+                onClick={() => setThresholdY((v) => Math.max(0.18, +(v - 0.04).toFixed(2)))}
                 className="flex-1 rounded bg-stone-800 px-1.5 py-0.5 text-stone-200 hover:bg-stone-700"
               >
-                ▲ Line Up
+                ▲ Up
               </button>
               <button
-                onClick={() => setThresholdY((v) => Math.min(0.85, +(v + 0.04).toFixed(2)))}
+                onClick={() => setThresholdY((v) => Math.min(0.88, +(v + 0.04).toFixed(2)))}
                 className="flex-1 rounded bg-stone-800 px-1.5 py-0.5 text-stone-200 hover:bg-stone-700"
               >
-                ▼ Line Down
+                ▼ Down
               </button>
             </div>
 
             <div className="flex items-center justify-between text-[8.5px] text-stone-400">
-              <span>Or click video to move line</span>
-              <button
-                onClick={onToggleEnabled}
-                className="underline hover:text-stone-200"
-              >
-                {enabled ? 'Disable' : 'Enable'}
+              <span>Click video to place line</span>
+              <button onClick={onToggleEnabled} className="underline hover:text-stone-200">
+                {enabled ? 'Off' : 'On'}
               </button>
             </div>
           </div>

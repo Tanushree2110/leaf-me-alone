@@ -1,12 +1,12 @@
 // Leaf Me Alone — Chrome Extension Background Service Worker
-// Automatically reads all open Chrome tabs across all windows and injects them into Leaf Me Alone
+// Automatically reads all open Chrome tabs and allows child tabs opened from any initial allowed tab
 
 async function getAllOpenChromeTabs() {
   const tabs = await chrome.tabs.query({})
   return tabs.map((t) => ({
     chromeTabId: t.id,
-    title: t.title || t.url || 'Chrome Tab',
-    url: t.url || '',
+    title: t.title || t.pendingUrl || t.url || 'Chrome Tab',
+    url: t.url || t.pendingUrl || '',
     openerTabId: t.openerTabId || null,
     active: Boolean(t.active),
   }))
@@ -31,7 +31,6 @@ async function broadcastOpenTabsToGame() {
   }
 }
 
-// Immediately inject content.js into any already-open localhost:5173 tabs when the extension is installed/loaded!
 chrome.runtime.onInstalled.addListener(async () => {
   const allTabs = await chrome.tabs.query({})
   const gameTabs = allTabs.filter(
