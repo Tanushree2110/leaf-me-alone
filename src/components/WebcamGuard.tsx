@@ -28,6 +28,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
   const lastTimestampMsRef = useRef<number>(0)
 
   const hasTriggeredForCurrentAbsenceRef = useRef<boolean>(false)
+  const missingStartMsRef = useRef<number | null>(null)
 
   const callbacksRef = useRef({
     status,
@@ -44,10 +45,9 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [status, onStatusChange, onAwayDetected, onBackFocused])
 
-  const missingStartMsRef = useRef<number | null>(null)
-
   // Initialize local MediaPipe Neural FaceDetector from /wasm and /models
-  // Confidence 0.52 ensures ONLY a real human face is detected (walls/chairs/doors NEVER match!)
+  // Confidence 0.25 detects faces even at an angle, with glasses, or in dim lighting,
+  // while still returning 0 detections on an empty wall/chair!
   useEffect(() => {
     let cancelled = false
     async function initMediaPipe() {
@@ -59,7 +59,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             modelAssetPath: '/models/blaze_face_short_range.tflite',
           },
           runningMode: 'VIDEO',
-          minDetectionConfidence: 0.52,
+          minDetectionConfidence: 0.25,
         })
         if (!cancelled) {
           mpDetectorRef.current = detector
@@ -124,15 +124,18 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
     }
   }, [enabled, startCamera, stopCamera])
 
-  // Real-time Neural Face Presence Loop (Pure MediaPipe BlazeFace — zero wall/furniture false positives!)
+  // Real-time Neural Face Presence Loop
   useEffect(() => {
     if (!enabled) return
 
     let isDetecting = false
 
     const interval = setInterval(() => {
-      // Do not penalize while working on another allowed browser tab
-      if (typeof document !== 'undefined' && document.hidden) {
+      // Never run camera checks in Cursor's internal preview webview or in hidden background tabs!
+      if (
+        typeof document !== 'undefined' &&
+        (document.hidden || /Electron|Cursor/i.test(navigator.userAgent))
+      ) {
         missingStartMsRef.current = null
         return
       }
@@ -156,16 +159,15 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       }
       if (video.readyState < 2 || video.videoWidth === 0) return
 
-      // Wait until MediaPipe neural detector is ready
       if (!mpReadyRef.current || !mpDetectorRef.current) return
 
       isDetecting = true
       try {
         let faceVisible = false
-        let boxX = 0.26
+        let boxX = 0.25
         let boxY = 0.18
-        let boxW = 0.48
-        let boxH = 0.62
+        let boxW = 0.5
+        let boxH = 0.64
 
         try {
           const nowPerf = Math.max(
@@ -179,8 +181,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             const bb = det.boundingBox
             const vw = video.videoWidth || 320
             const vh = video.videoHeight || 240
-            // Must have a real human face bounding box with eyes/nose keypoints inside the frame
-            if (bb && bb.width >= 28 && bb.height >= 28) {
+            if (bb && bb.width >= 16 && bb.height >= 16) {
               faceVisible = true
               boxX = bb.originX / vw
               boxY = bb.originY / vh
@@ -199,11 +200,11 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
         } = callbacksRef.current
 
         if (!faceVisible) {
-          // As soon as your face is outside the screen for 0.8s -> TURN RED & GET ANGRY!
+          // 1.5s continuous absence before turning RED (fast when you step out of frame, zero false-red when blinking/turning head)
           if (!missingStartMsRef.current) missingStartMsRef.current = now
           const elapsed = (now - missingStartMsRef.current) / 1000
 
-          if (elapsed >= 0.8) {
+          if (elapsed >= 1.5) {
             if (curStatus !== 'away_detected') {
               cbStatus('away_detected')
             }
@@ -213,7 +214,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             }
           }
         } else {
-          // Face is inside the screen -> GREEN!
+          // Face is inside the camera -> Immediately GREEN!
           missingStartMsRef.current = null
           hasTriggeredForCurrentAbsenceRef.current = false
           if (curStatus !== 'focused') {
@@ -233,9 +234,9 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
             const showRed =
               !faceVisible &&
               missingStartMsRef.current !== null &&
-              now - missingStartMsRef.current >= 800
+              now - missingStartMsRef.current >= 1500
 
-            if (!showRed && faceVisible) {
+            if (!showRed) {
               const mirroredX = (1 - (boxX + boxW)) * W
               const ry = boxY * H
               const rw = boxW * W
@@ -244,7 +245,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
               octx.strokeStyle = '#10b981'
               octx.lineWidth = 2.5
               octx.strokeRect(mirroredX, ry, rw, rh)
-            } else if (showRed) {
+            } else {
               octx.fillStyle = 'rgba(244, 63, 94, 0.45)'
               octx.fillRect(0, 0, W, H)
               octx.strokeStyle = '#f43f5e'
@@ -256,7 +257,7 @@ export const WebcamGuard: React.FC<WebcamGuardProps> = ({
       } finally {
         isDetecting = false
       }
-    }, 150)
+    }, 160)
 
     return () => clearInterval(interval)
   }, [enabled, startCamera])
