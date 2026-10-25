@@ -584,9 +584,16 @@ export function App() {
     }
   }, [triggerDistraction])
 
-  // Block Cmd+T / Ctrl+T shortcut while on the game page
-  // NOTE: Switching between or closing your existing tabs (visibilitychange) is 100% ALLOWED and NEVER triggers red!
+  // Block Cmd+T / Cmd+N AND block moving off from Google Chrome to another desktop app!
+  // Switching between or closing your existing tabs inside Chrome sets document.hidden = true, which is 100% ALLOWED.
+  // Moving off from Chrome to another app leaves document.hidden === false while document.hasFocus() becomes false!
   useEffect(() => {
+    if (typeof navigator !== 'undefined' && /Electron|Cursor/i.test(navigator.userAgent)) {
+      return
+    }
+
+    let blurCheckTimeout: ReturnType<typeof setTimeout> | null = null
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (
         (e.metaKey || e.ctrlKey) &&
@@ -603,9 +610,34 @@ export function App() {
       }
     }
 
+    const handleWindowBlur = () => {
+      if (blurCheckTimeout) clearTimeout(blurCheckTimeout)
+      blurCheckTimeout = setTimeout(() => {
+        // If document.hidden is false but document.hasFocus() is false, the user left Chrome for another app!
+        if (!document.hidden && !document.hasFocus()) {
+          triggerDistraction(
+            'Moved off from Google Chrome to another app!',
+            'blocked_new_tab'
+          )
+        }
+      }, 150)
+    }
+
+    const handleWindowFocus = () => {
+      if (blurCheckTimeout) {
+        clearTimeout(blurCheckTimeout)
+        blurCheckTimeout = null
+      }
+    }
+
     window.addEventListener('keydown', handleKeyDown, true)
+    window.addEventListener('blur', handleWindowBlur)
+    window.addEventListener('focus', handleWindowFocus)
     return () => {
+      if (blurCheckTimeout) clearTimeout(blurCheckTimeout)
       window.removeEventListener('keydown', handleKeyDown, true)
+      window.removeEventListener('blur', handleWindowBlur)
+      window.removeEventListener('focus', handleWindowFocus)
     }
   }, [triggerDistraction])
 
@@ -625,14 +657,18 @@ export function App() {
     )
   }, [triggerDistraction])
 
-  // Whenever your face is visible on screen, clear the RED banner after 3s of a tab alert or immediately after returning to camera!
+  // Whenever your face is visible on screen AND Chrome is focused, clear the RED banner after 3s of a tab alert!
   const handleCameraBackFocused = useCallback(() => {
+    if (typeof document !== 'undefined' && !document.hasFocus() && !document.hidden) {
+      // User is still outside Chrome in another desktop app -> Stay RED!
+      return
+    }
     if (Date.now() - lastDistractionMsRef.current < 3000) return
     if (focusMode === 'distracted' || focusMode === 'last_leaf_climax' || currentRedReason) {
       setCurrentRedReason(null)
       setFocusMode('locked_in')
       setRoommateState('typing')
-      setDialogueText('On screen & focused! Sunlight is back—watch the ivy climb.')
+      setDialogueText('On screen & focused in Chrome! Sunlight is back—watch the ivy climb.')
     }
   }, [focusMode, currentRedReason])
 

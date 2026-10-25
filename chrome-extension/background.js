@@ -90,7 +90,7 @@ async function injectScriptsIntoOpenTabs() {
 chrome.runtime.onInstalled.addListener(injectScriptsIntoOpenTabs)
 chrome.runtime.onStartup.addListener(injectScriptsIntoOpenTabs)
 
-// BLOCK OPENING ANY NEW BROWSER WINDOW (Cmd+N / New Window)!
+// BLOCK OPENING ANY NEW BROWSER WINDOW (Cmd+N / New Window) OR MOVING OFF FROM CHROME!
 if (chrome.windows && chrome.windows.onCreated) {
   chrome.windows.onCreated.addListener(async (win) => {
     if (win && win.id && !allowedWindowIds.has(win.id)) {
@@ -98,6 +98,18 @@ if (chrome.windows && chrome.windows.onCreated) {
         await chrome.windows.remove(win.id)
       } catch {}
       await notifyBlockedAction('Blocked opening a New Browser Window (Cmd+N)!')
+    }
+  })
+}
+
+let lastChromeBlurAlertMs = 0
+if (chrome.windows && chrome.windows.onFocusChanged) {
+  chrome.windows.onFocusChanged.addListener(async (windowId) => {
+    if (windowId === chrome.windows.WINDOW_ID_NONE) {
+      const now = Date.now()
+      if (now - lastChromeBlurAlertMs < 1500) return
+      lastChromeBlurAlertMs = now
+      await notifyBlockedAction('Moved off from Google Chrome to another app!')
     }
   })
 }

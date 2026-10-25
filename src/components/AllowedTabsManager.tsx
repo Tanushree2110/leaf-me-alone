@@ -53,7 +53,7 @@ export const AllowedTabsManager: React.FC<AllowedTabsManagerProps> = ({
             ✕
           </span>
           <span>
-            <strong>New Tabs Blocked:</strong> Opening a standalone new tab (`Cmd+T` / `+`) is blocked and logs a RED violation.
+            <strong>Blocked:</strong> Opening a standalone new tab (`Cmd+T` / `+`), opening a new window (`Cmd+N`), or moving off from Chrome to another app triggers a RED violation.
           </span>
         </div>
       </div>
