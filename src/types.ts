@@ -22,7 +22,9 @@ export interface AllowedTab {
   title: string
   url: string
   parentId?: string // If expanded from an initial allowed tab
-  chromeTabId?: number // Real Chrome tab ID when synced via Chrome Extension
+  chromeTabId?: string | number // Real Chrome tab ID when synced via Chrome
+  windowIndex?: number
+  tabIndex?: number
   isActive?: boolean
 }
 
