@@ -1078,55 +1078,19 @@ export function App() {
           </div>
         )}
 
-        {/* COMPACT FLOATING WEBCAM PILL (Bottom-Left Corner) */}
-        <div className="absolute bottom-5 left-5 z-20 max-w-xs">
-          {isWebcamExpanded ? (
-            <div className="relative shadow-2xl">
-              <button
-                onClick={() => setIsWebcamExpanded(false)}
-                className="absolute -top-2 -right-2 z-30 flex h-5 w-5 items-center justify-center rounded-full border border-stone-700 bg-stone-900 text-stone-400 hover:text-white"
-              >
-                <ChevronDown className="h-3 w-3" />
-              </button>
-              <WebcamGuard
-                enabled={webcamEnabled}
-                onToggleEnabled={() => setWebcamEnabled((v) => !v)}
-                status={cameraStatus}
-                onStatusChange={setCameraStatus}
-                onPhoneDetected={handlePhoneDetected}
-                onAwayDetected={handleAwayDetected}
-                onBackFocused={handleCameraBackFocused}
-                compact
-              />
-            </div>
-          ) : (
-            <button
-              onClick={() => setIsWebcamExpanded(true)}
-              className={`flex items-center gap-2 rounded-xl border px-3 py-1.5 font-mono text-xs font-bold shadow-xl backdrop-blur-md transition ${
-                cameraStatus === 'phone_detected'
-                  ? 'border-rose-500 bg-rose-950/90 text-rose-200 animate-pulse'
-                  : cameraStatus === 'away_detected'
-                  ? 'border-amber-500 bg-amber-950/90 text-amber-200 animate-pulse'
-                  : cameraStatus === 'keyboard_glance'
-                  ? 'border-sky-500 bg-sky-950/90 text-sky-200'
-                  : 'border-stone-700 bg-stone-900/90 text-emerald-300'
-              }`}
-            >
-              <Video className="h-3.5 w-3.5" />
-              <span>
-                {cameraStatus === 'phone_detected'
-                  ? 'Phone!'
-                  : cameraStatus === 'away_detected'
-                  ? 'Away!'
-                  : cameraStatus === 'keyboard_glance'
-                  ? 'Typing'
-                  : webcamEnabled
-                  ? 'Cam On'
-                  : 'Cam Off'}
-              </span>
-              <ChevronUp className="h-3 w-3 opacity-60" />
-            </button>
-          )}
+        {/* ALWAYS-MOUNTED LIVE WEBCAM GUARD (Bottom-Left Corner) */}
+        <div className="absolute bottom-4 left-4 z-20">
+          <WebcamGuard
+            enabled={webcamEnabled}
+            onToggleEnabled={() => setWebcamEnabled((v) => !v)}
+            status={cameraStatus}
+            onStatusChange={setCameraStatus}
+            onPhoneDetected={handlePhoneDetected}
+            onAwayDetected={handleAwayDetected}
+            onBackFocused={handleCameraBackFocused}
+            isExpanded={isWebcamExpanded}
+            onToggleExpanded={() => setIsWebcamExpanded((v) => !v)}
+          />
         </div>
 
         {/* MINIMAL POPOVER PANELS (Top-Right over Studio) */}
