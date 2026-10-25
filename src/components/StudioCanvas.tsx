@@ -1096,14 +1096,13 @@ function drawCanvasHud(
   nextLeafProgress: number
 ) {
   const attachedCount = leaves.filter((l) => l.status === 'attached' || l.status === 'dying').length
-  const fallenCount = leaves.filter((l) => l.status === 'falling' || l.status === 'fallen').length
 
   ctx.save()
-  ctx.fillStyle = 'rgba(12, 10, 9, 0.85)'
-  ctx.strokeStyle = 'rgba(255,255,255,0.14)'
+  ctx.fillStyle = 'rgba(12, 10, 9, 0.82)'
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'
   ctx.lineWidth = 1
   ctx.beginPath()
-  ctx.roundRect(16, 10, 485, 28, 8)
+  ctx.roundRect(16, 10, 324, 26, 8)
   ctx.fill()
   ctx.stroke()
 
@@ -1118,21 +1117,21 @@ function drawCanvasHud(
 
   ctx.fillStyle = dotColor
   ctx.beginPath()
-  ctx.arc(29, 24, 4.5, 0, Math.PI * 2)
+  ctx.arc(28, 23, 4, 0, Math.PI * 2)
   ctx.fill()
 
   ctx.fillStyle = '#e7e5e4'
   ctx.font = 'bold 10.5px "JetBrains Mono", monospace'
   ctx.fillText(
-    `VINE: ${attachedCount}/14 LIVE · ${fallenCount} FLOOR · ${roomTempCelsius.toFixed(0)}°C`,
-    42,
-    28
+    `${attachedCount}/14 LEAVES · ${roomTempCelsius.toFixed(0)}°C`,
+    40,
+    27
   )
 
-  // Live Next-Leaf Sprout Progress Bar right inside the top HUD!
-  const barX = 290
-  const barY = 17
-  const barW = 115
+  // Compact Next-Leaf Progress Bar
+  const barX = 185
+  const barY = 16
+  const barW = 144
   const barH = 14
   ctx.fillStyle = '#1c1917'
   ctx.beginPath()
@@ -1148,13 +1147,12 @@ function drawCanvasHud(
   ctx.font = 'bold 9px "JetBrains Mono", monospace'
   ctx.fillText(
     attachedCount >= 14
-      ? 'FULL BLOOM!'
-      : `NEXT LEAF: ${Math.round(nextLeafProgress * 100)}%`,
-    barX + 10,
+      ? 'FULL BLOOM'
+      : `NEXT LEAF ${Math.round(nextLeafProgress * 100)}%`,
+    barX + 26,
     barY + 10.5
   )
 
-  // If in Last Leaf Climax, show O. Henry Redemption Progress Bar across bottom of window
   if (focusMode === 'last_leaf_climax' && comebackProgress > 0) {
     ctx.fillStyle = 'rgba(15, 23, 42, 0.92)'
     ctx.strokeStyle = '#facc15'
@@ -1172,8 +1170,8 @@ function drawCanvasHud(
     ctx.fillStyle = '#fefce8'
     ctx.font = 'bold 9.5px "JetBrains Mono", monospace'
     ctx.fillText(
-      `O. HENRY REDEMPTION: ${Math.round(comebackProgress * 100)}% TO GOLDEN LEAF`,
-      58,
+      `GOLDEN LEAF COMEBACK: ${Math.round(comebackProgress * 100)}%`,
+      92,
       383
     )
   }
