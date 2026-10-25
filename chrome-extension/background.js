@@ -1,7 +1,7 @@
 // Leaf Me Alone — Strict Tab Guard Background Service Worker
-// - Records existing open tabs
+// - Records existing open tabs at start
 // - BLOCKS & CLOSES any manually opened New Tab (Cmd+T / + button / chrome://newtab)
-// - ONLY allows new tabs opened by clicking a link (<a href>) on an existing allowed tab!
+// - ONLY allows new tabs opened by clicking an actual <a href> link on an existing allowed tab!
 
 let recentLinkClicks = [] // { tabId, url, timestamp }
 let allowedTabIds = new Set()
@@ -52,7 +52,7 @@ async function broadcastOpenTabsToGame() {
   })
 }
 
-chrome.runtime.onInstalled.addListener(async () => {
+async function injectIntoExistingTabs() {
   await initAllowedExistingTabs()
   const allTabs = await chrome.tabs.query({})
   for (const t of allTabs) {
@@ -73,20 +73,35 @@ chrome.runtime.onInstalled.addListener(async () => {
     }
   }
   broadcastOpenTabsToGame()
-})
+}
+
+chrome.runtime.onInstalled.addListener(injectIntoExistingTabs)
+chrome.runtime.onStartup.addListener(injectIntoExistingTabs)
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'LEAF_LINK_CLICKED_ON_TAB') {
     const senderTabId = sender?.tab?.id
     if (senderTabId && allowedTabIds.has(senderTabId)) {
       const now = Date.now()
-      recentLinkClicks = recentLinkClicks.filter((c) => now - c.timestamp < 8000)
+      recentLinkClicks = recentLinkClicks.filter((c) => now - c.timestamp < 5000)
       recentLinkClicks.push({
         tabId: senderTabId,
         url: msg.url,
         timestamp: now,
       })
     }
+    sendResponse({ ok: true })
+    return true
+  }
+
+  if (msg?.type === 'LEAF_NEW_TAB_OVERRIDE_TRIGGERED') {
+    if (sender?.tab?.id) {
+      chrome.tabs.remove(sender.tab.id).catch(() => {})
+    }
+    sendToGameTabs({
+      type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
+      attemptedUrl: 'New Tab (+ / Cmd+T)',
+    })
     sendResponse({ ok: true })
     return true
   }
@@ -117,24 +132,20 @@ chrome.tabs.onCreated.addListener(async (tab) => {
   const now = Date.now()
   const targetUrl = tab.pendingUrl || tab.url || ''
 
-  // Check if this new tab is a blank manual New Tab (Cmd+T or clicking '+' in Chrome)
+  // Always block chrome://newtab, about:blank, or empty new tabs
   const isManualBlankNewTab =
     !targetUrl ||
     targetUrl.startsWith('chrome://newtab') ||
+    targetUrl.startsWith('chrome-extension://') ||
     targetUrl.startsWith('edge://newtab') ||
     targetUrl === 'about:blank'
 
-  // Check if opened by clicking a link on an existing allowed tab!
-  const hasAllowedOpener = Boolean(tab.openerTabId && allowedTabIds.has(tab.openerTabId))
+  // STRICT CHECK: Must have been triggered by an actual <a href> link click on an existing allowed tab!
   const matchedLinkClick = recentLinkClicks.some(
-    (c) =>
-      now - c.timestamp < 8000 &&
-      allowedTabIds.has(c.tabId) &&
-      (!targetUrl || c.url === targetUrl || targetUrl.startsWith('http'))
+    (c) => now - c.timestamp < 5000 && allowedTabIds.has(c.tabId)
   )
 
-  if (!isManualBlankNewTab && (hasAllowedOpener || matchedLinkClick)) {
-    // ALLOWED: Opened by clicking a link on an existing allowed tab!
+  if (!isManualBlankNewTab && matchedLinkClick) {
     if (tab.id) {
       allowedTabIds.add(tab.id)
     }
@@ -149,15 +160,12 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     })
     broadcastOpenTabsToGame()
   } else {
-    // BLOCKED! User tried to open a brand new tab (Cmd+T / + button)!
-    // 1. Immediately close the unauthorized new tab so they CANNOT open new tabs no matter what!
+    // IMMEDIATELY CLOSE THE NEW TAB!
     if (tab.id) {
       try {
         await chrome.tabs.remove(tab.id)
       } catch {}
     }
-
-    // 2. Focus back on the game tab or previous allowed tab & trigger RED violation!
     await sendToGameTabs({
       type: 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED',
       attemptedUrl: targetUrl || 'New Tab (Cmd+T)',

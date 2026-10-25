@@ -5,22 +5,15 @@ import {
   CheckCircle2,
   ChevronDown,
   Coffee,
-  FastForward,
   Layers,
   Leaf,
   Palette,
   Play,
-  RotateCcw,
-  ShieldAlert,
   ShieldCheck,
-  Sparkles,
   Square,
-  Sun,
-  ThermometerSnowflake,
   Timer,
   Volume2,
   VolumeX,
-  Wand2,
   X,
 } from 'lucide-react'
 import {
@@ -49,7 +42,7 @@ import { WebcamGuard } from './components/WebcamGuard'
 import { AllowedTabsManager } from './components/AllowedTabsManager'
 import { PomodoroConfig, PomodoroPanel } from './components/PomodoroPanel'
 
-type ExpandablePanel = 'pomodoro' | 'tabs' | 'upgrades' | 'demo' | null
+type ExpandablePanel = 'pomodoro' | 'tabs' | 'upgrades' | null
 
 function generateProceduralVineSegments(): VineSegment[] {
   const points = [
@@ -158,7 +151,6 @@ export function App() {
     'Select your Pomodoro timer & initial tabs, then click Start!'
   )
 
-  // Sound state synced with SoundEngine
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => soundFX.isEnabled())
 
   useEffect(() => {
@@ -179,7 +171,7 @@ export function App() {
     }
   }, [])
 
-  // Opt-In Customizable Pomodoro State (Starts stopped initially so user can select timer & initial tabs; locks once started!)
+  // Opt-In Customizable Pomodoro State
   const [pomodoro, setPomodoro] = useState<PomodoroConfig>({
     enabled: true,
     isRunning: false,
@@ -198,7 +190,7 @@ export function App() {
 
   // Webcam Guard State
   const [webcamEnabled, setWebcamEnabled] = useState<boolean>(true)
-  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('initializing')
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('focused')
 
   // Chrome Tabs State
   const [allowedTabs, setAllowedTabs] = useState<AllowedTab[]>(() => loadSavedChromeTabs())
@@ -206,8 +198,8 @@ export function App() {
   const [activeAllowedTabId, setActiveAllowedTabId] = useState<string | null>('tab-current')
   const [extensionConnected, setExtensionConnected] = useState<boolean>(false)
 
-  // Track when user intentionally clicked a link from an existing tab so visibilitychange allows that link click
   const authorizedLinkClickUntilMsRef = useRef<number>(0)
+  const lastDistractionMsRef = useRef<number>(0)
 
   useEffect(() => {
     try {
@@ -249,12 +241,13 @@ export function App() {
     []
   )
 
-  // Determine whether rough storm weather + RED violation state is active!
+  // Rough storm weather + RED border is ONLY active when your face is missing from camera
+  // OR for 3 seconds right after an unauthorized tab attempt!
   const isRoughWeather =
-    focusMode === 'distracted' ||
-    focusMode === 'last_leaf_climax' ||
+    cameraStatus === 'away_detected' ||
     cameraStatus === 'phone_detected' ||
-    cameraStatus === 'away_detected'
+    focusMode === 'distracted' ||
+    focusMode === 'last_leaf_climax'
 
   // Sync Background Music (Soothing Pad when Studying vs Thunder Storm when Not Studying)
   useEffect(() => {
@@ -337,7 +330,7 @@ export function App() {
     setStats((s) => ({ ...s, leavesGrown: s.leavesGrown + 1 }))
   }, [vineSegments])
 
-  // Trigger a distraction event -> turns studio RED, drops a leaf, and starts thunder storm!
+  // Trigger a distraction event
   const triggerDistraction = useCallback(
     (
       reason = 'Opened an unapproved new tab!',
@@ -351,6 +344,7 @@ export function App() {
         return
       }
 
+      lastDistractionMsRef.current = Date.now()
       setDaysSinceDoomscroll(0)
       leafAccumulatorSecRef.current = 0
       setNextLeafProgress(0)
@@ -476,7 +470,6 @@ export function App() {
         }
       }
 
-      // Allowed sub-tab opened by clicking a link on an existing allowed tab!
       if (data.type === 'LEAF_CHROME_LINK_TAB_ALLOWED' && data.tab) {
         const newTab = data.tab as {
           chromeTabId: number
@@ -506,7 +499,6 @@ export function App() {
         })
       }
 
-      // BLOCKED! User tried to open a new tab (Cmd+T / + button)!
       if (data.type === 'LEAF_CHROME_UNAUTHORIZED_NEW_TAB_BLOCKED') {
         triggerDistraction('BLOCKED NEW TAB! Only links clicked from existing tabs are allowed!')
       }
@@ -528,7 +520,6 @@ export function App() {
     window.postMessage({ type: 'LEAF_APP_REQUEST_SYNC' }, '*')
   }
 
-  // Clicking a link from an existing tab in the UI -> Allowed!
   const handleOpenLinkFromExistingTab = (parentTab: AllowedTab, linkUrl: string) => {
     authorizedLinkClickUntilMsRef.current = Date.now() + 12000
     const subTab: AllowedTab = {
@@ -558,11 +549,13 @@ export function App() {
     }
   }
 
-  // STRICT TAB GUARD (Even without the extension):
-  // Any time you open a new tab (`Cmd+T` / `+`) or leave this tab without clicking an allowed link -> IMMEDIATE RED VIOLATION!
+  // Block Cmd+T / Ctrl+T on page & detect unauthorized tab switches
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && (e.key === 't' || e.key === 'T' || e.key === 'n' || e.key === 'N')) {
+      if (
+        (e.metaKey || e.ctrlKey) &&
+        (e.key === 't' || e.key === 'T' || e.key === 'n' || e.key === 'N')
+      ) {
         e.preventDefault()
         triggerDistraction('NO NEW TABS ALLOWED! Only click links on existing tabs!')
       }
@@ -570,11 +563,9 @@ export function App() {
 
     const handleVisibility = () => {
       if (document.hidden) {
-        // Did the user click an allowed link or allowed tab within the last few seconds?
         if (Date.now() <= authorizedLinkClickUntilMsRef.current) {
           return
         }
-        // Otherwise: User opened a new tab or switched to an unapproved tab -> TURN RED IMMEDIATELY!
         triggerDistraction('Opened a new/unapproved tab! Only links from existing tabs allowed!')
       }
     }
@@ -587,7 +578,6 @@ export function App() {
     }
   }, [triggerDistraction])
 
-  // Also allow clicking any <a href> link on the page itself
   useEffect(() => {
     const handleAnchorClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null
@@ -608,11 +598,14 @@ export function App() {
     triggerDistraction('Webcam: Face disappeared from camera!', AWAY_DETECTED_QUOTES, 'camera')
   }, [triggerDistraction])
 
+  // Whenever your face is visible on screen, automatically clear any red distraction state!
   const handleCameraBackFocused = useCallback(() => {
-    if (focusMode === 'distracted') {
+    // Allow at least 2.2s after a tab violation so you see the red flash, then immediately restore GREEN when on screen!
+    if (Date.now() - lastDistractionMsRef.current < 2200) return
+    if (focusMode === 'distracted' || focusMode === 'last_leaf_climax') {
       setFocusMode('locked_in')
       setRoommateState('typing')
-      setDialogueText('Face back on camera! Storm clearing—resuming deep work.')
+      setDialogueText('On screen & focused! Sunlight is back—watch the ivy climb.')
     }
   }, [focusMode])
 
@@ -677,7 +670,6 @@ export function App() {
     return 180
   }, [pomodoro.enabled, pomodoro.focusMinutes, pomodoro.leavesPerCycle])
 
-  // Start Pomodoro Session -> Locks Pomodoro settings & Initial Tabs!
   const handleStartPomodoroSession = useCallback(() => {
     soundFX.playPomodoroBell()
     setIsWhitelistLocked(true)
@@ -694,7 +686,6 @@ export function App() {
     }))
   }, [pomodoro.focusMinutes])
 
-  // Stop Pomodoro Session -> Unlocks Pomodoro settings so user can switch/select timers!
   const handleStopPomodoroSession = useCallback(() => {
     leafAccumulatorSecRef.current = 0
     setNextLeafProgress(0)
@@ -811,30 +802,6 @@ export function App() {
             roomTempCelsius: Math.min(24, prev.roomTempCelsius + 0.3 * delta),
           }
         }
-
-        if (focusMode === 'last_leaf_climax') {
-          const nextComeback = prev.comebackProgressSeconds + delta
-          if (nextComeback >= 300) {
-            soundFX.playGoldenFanfare()
-            setFocusMode('golden_comeback')
-            setRoommateState('painting_golden_leaf')
-            sproutOneLeaf()
-            setDialogueText(pickRandomDialogue('painting_golden_leaf'))
-            return {
-              ...prev,
-              focusSeconds: prev.focusSeconds + delta,
-              unbrokenFocusSeconds: prev.unbrokenFocusSeconds + delta,
-              comebackProgressSeconds: 300,
-              goldenLeavesPainted: prev.goldenLeavesPainted + 1,
-              roomTempCelsius: 23,
-            }
-          }
-          return {
-            ...prev,
-            comebackProgressSeconds: nextComeback,
-          }
-        }
-
         return prev
       })
     }, 1000)
@@ -870,82 +837,6 @@ export function App() {
       return newlyUnlocked ? updated : prev
     })
   }, [stats.focusSeconds])
-
-  const handleLockInAndSprout = () => {
-    setFocusMode('locked_in')
-    setRoommateState('typing')
-    setDialogueText(pickRandomDialogue('typing'))
-    sproutOneLeaf()
-    leafAccumulatorSecRef.current = 0
-    setNextLeafProgress(0.1)
-  }
-
-  const handleTriggerLastLeafClimax = () => {
-    soundFX.playThunderClimax()
-    setFocusMode('last_leaf_climax')
-    setRoommateState('dramatic_sickbed')
-    setDialogueText(pickRandomDialogue('dramatic_sickbed'))
-    setDaysSinceDoomscroll(0)
-
-    setLeaves((prev) => {
-      let keptOne = false
-      return prev.map((leaf, idx) => {
-        if (!keptOne && (leaf.status === 'attached' || idx === 0)) {
-          keptOne = true
-          return { ...leaf, status: 'attached' as const, health: 0.45, segmentIndex: 2 }
-        }
-        if (leaf.status === 'attached') {
-          const seg = vineSegments[Math.min(leaf.segmentIndex, vineSegments.length - 1)]
-          return {
-            ...leaf,
-            status: 'falling' as const,
-            health: 0.1,
-            x: seg.x1,
-            y: seg.y1,
-            vx: 1.2 + Math.random(),
-            vy: 1.8,
-            vRot: 0.06,
-          }
-        }
-        return leaf
-      })
-    })
-
-    setStats((prev) => ({ ...prev, comebackProgressSeconds: 45, roomTempCelsius: 8 }))
-  }
-
-  const handleTriggerGoldenLeafTwist = () => {
-    soundFX.playGoldenFanfare()
-    setFocusMode('golden_comeback')
-    setRoommateState('painting_golden_leaf')
-    sproutOneLeaf()
-    setDialogueText(pickRandomDialogue('painting_golden_leaf'))
-    setStats((prev) => ({
-      ...prev,
-      comebackProgressSeconds: 300,
-      goldenLeavesPainted: prev.goldenLeavesPainted + 1,
-      roomTempCelsius: 23,
-    }))
-  }
-
-  const handleSweepFloor = () => {
-    setRoommateState('sweeping_leaves')
-    setDialogueText(pickRandomDialogue('sweeping_leaves'))
-    setTimeout(() => {
-      setLeaves((prev) => prev.filter((l) => l.status !== 'fallen'))
-    }, 900)
-  }
-
-  const handleResetSession = () => {
-    setFocusMode('locked_in')
-    setRoommateState('typing')
-    setLeaves(createInitialLeaves(vineSegments))
-    setVineGrowthProgress(0.38)
-    leafAccumulatorSecRef.current = 0
-    setNextLeafProgress(0.1)
-    setDaysSinceDoomscroll(4)
-    setDialogueText(pickRandomDialogue('typing'))
-  }
 
   const formatTimer = (sec: number) => {
     const m = Math.floor(sec / 60)
@@ -1058,7 +949,7 @@ export function App() {
           )}
         </div>
 
-        {/* Right: Clean Controls */}
+        {/* Right: Clean Controls (Tabs, Room & Skins, Sound, Polaroid) */}
         <div className="flex items-center gap-1.5 font-mono text-xs">
           <button
             onClick={() => togglePanel('tabs')}
@@ -1111,19 +1002,6 @@ export function App() {
                 <span className="hidden sm:inline">Muted</span>
               </>
             )}
-          </button>
-
-          {/* Demo / Story Preview */}
-          <button
-            onClick={() => togglePanel('demo')}
-            className={`flex items-center gap-1 rounded-lg border px-2 py-1 font-semibold transition ${
-              activePanel === 'demo'
-                ? 'border-purple-500 bg-purple-500/20 text-purple-200'
-                : 'border-stone-800 bg-stone-900 text-stone-400 hover:bg-stone-800 hover:text-stone-200'
-            }`}
-            title="Test Story Moments & Speed"
-          >
-            <Wand2 className="h-3.5 w-3.5 text-purple-400" />
           </button>
 
           {/* Export Polaroid */}
@@ -1209,7 +1087,6 @@ export function App() {
                 {activePanel === 'pomodoro' && 'Pomodoro & Break'}
                 {activePanel === 'tabs' && 'Allowed Chrome Tabs'}
                 {activePanel === 'upgrades' && 'Room Skins & Upgrades'}
-                {activePanel === 'demo' && 'Story Simulator'}
               </span>
               <button
                 onClick={() => setActivePanel(null)}
@@ -1324,71 +1201,6 @@ export function App() {
                       </div>
                     ))}
                   </div>
-                </div>
-              </div>
-            )}
-
-            {activePanel === 'demo' && (
-              <div className="space-y-2 font-mono text-xs">
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button
-                    onClick={handleLockInAndSprout}
-                    className="flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-950/50 p-2 text-[11px] font-bold text-emerald-300"
-                  >
-                    <Sun className="h-3.5 w-3.5" /> +1 Leaf
-                  </button>
-                  <button
-                    onClick={() => triggerDistraction('Opened unapproved tab!')}
-                    className="flex items-center gap-1 rounded-lg border border-orange-500/40 bg-orange-950/50 p-2 text-[11px] font-bold text-orange-300"
-                  >
-                    <ThermometerSnowflake className="h-3.5 w-3.5" /> Storm &amp; Drop
-                  </button>
-                  <button
-                    onClick={handleTriggerLastLeafClimax}
-                    className="flex items-center gap-1 rounded-lg border border-rose-500/40 bg-rose-950/50 p-2 text-[11px] font-bold text-rose-300"
-                  >
-                    <ShieldAlert className="h-3.5 w-3.5" /> Last Leaf
-                  </button>
-                  <button
-                    onClick={handleTriggerGoldenLeafTwist}
-                    className="flex items-center gap-1 rounded-lg border border-yellow-500/40 bg-yellow-950/50 p-2 text-[11px] font-bold text-yellow-300"
-                  >
-                    <Sparkles className="h-3.5 w-3.5" /> Gold Leaf
-                  </button>
-                </div>
-
-                <div className="flex items-center justify-between border-t border-stone-800 pt-2">
-                  <button
-                    onClick={() =>
-                      setStats((s) => ({
-                        ...s,
-                        speedMultiplier: s.speedMultiplier === 1 ? 15 : 1,
-                      }))
-                    }
-                    className={`flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-bold ${
-                      stats.speedMultiplier > 1
-                        ? 'border-amber-500 bg-amber-500/20 text-amber-300'
-                        : 'border-stone-700 bg-stone-800 text-stone-300'
-                    }`}
-                  >
-                    <FastForward className="h-3 w-3" /> {stats.speedMultiplier}x Speed
-                  </button>
-
-                  {fallenLeavesCount > 0 && (
-                    <button
-                      onClick={handleSweepFloor}
-                      className="rounded-lg border border-stone-700 bg-stone-800 px-2 py-1 text-[10px] text-stone-200"
-                    >
-                      Sweep ({fallenLeavesCount})
-                    </button>
-                  )}
-
-                  <button
-                    onClick={handleResetSession}
-                    className="flex items-center gap-1 rounded-lg border border-stone-700 bg-stone-800 px-2 py-1 text-[10px] text-stone-200"
-                  >
-                    <RotateCcw className="h-3 w-3" /> Reset
-                  </button>
                 </div>
               </div>
             )}
