@@ -356,16 +356,46 @@ export function App() {
 
       recordViolationInCurrentSession(category, reason)
 
+      // ALWAYS get angry & turn the studio RED on every single violation (even if all leaves have already fallen!)
+      const nextStates: RoommateState[] = [
+        'glaring_with_clipboard',
+        'sweeping_leaves',
+        'shivering',
+      ]
+      const chosenState = customQuotes
+        ? 'glaring_with_clipboard'
+        : nextStates[Math.floor(Math.random() * nextStates.length)]
+
+      const attachedNow = leaves.filter(
+        (l) => l.status === 'attached' || l.status === 'dying'
+      )
+      if (attachedNow.length === 2) {
+        soundFX.playThunderClimax()
+        setFocusMode('last_leaf_climax')
+        setRoommateState('dramatic_sickbed')
+        const quote = pickRandomDialogue('dramatic_sickbed', attachedNow[0]?.id || 1)
+        setDialogueText(`${reason} — ${quote}`)
+      } else {
+        soundFX.playClipboardPenalty()
+        setFocusMode('distracted')
+        setRoommateState(chosenState)
+        const quote = customQuotes
+          ? customQuotes[Math.floor(Math.random() * customQuotes.length)]
+          : pickRandomDialogue(chosenState, attachedNow[0]?.id || 1)
+        setDialogueText(`${reason} — ${quote}`)
+      }
+
       setLeaves((prevLeaves) => {
-        const attached = prevLeaves.filter((l) => l.status === 'attached' || l.status === 'dying')
+        const attached = prevLeaves.filter(
+          (l) => l.status === 'attached' || l.status === 'dying'
+        )
         if (attached.length === 0) return prevLeaves
 
         const sorted = [...attached].sort((a, b) => b.segmentIndex - a.segmentIndex)
         const victim = sorted[0]
         const seg = vineSegments[Math.min(victim.segmentIndex, vineSegments.length - 1)]
-        const remainingAfterDrop = attached.length - 1
 
-        const updated = prevLeaves.map((leaf) => {
+        return prevLeaves.map((leaf) => {
           if (leaf.id === victim.id) {
             return {
               ...leaf,
@@ -383,35 +413,6 @@ export function App() {
           }
           return leaf
         })
-
-        if (remainingAfterDrop === 1) {
-          soundFX.playThunderClimax()
-          setFocusMode('last_leaf_climax')
-          setRoommateState('dramatic_sickbed')
-          const quote = pickRandomDialogue('dramatic_sickbed', victim.id)
-          setDialogueText(`${reason} — ${quote}`)
-        } else {
-          soundFX.playClipboardPenalty()
-          setFocusMode('distracted')
-          const nextStates: RoommateState[] = [
-            'glaring_with_clipboard',
-            'sweeping_leaves',
-            'shivering',
-          ]
-          const chosenState = customQuotes
-            ? 'glaring_with_clipboard'
-            : nextStates[Math.floor(Math.random() * nextStates.length)]
-          setRoommateState(chosenState)
-          const quote = customQuotes
-            ? customQuotes[Math.floor(Math.random() * customQuotes.length)].replace(
-                '#3',
-                `#${victim.id}`
-              )
-            : pickRandomDialogue(chosenState, victim.id)
-          setDialogueText(`${reason} — ${quote}`)
-        }
-
-        return updated
       })
 
       setStats((prev) => ({
@@ -424,7 +425,7 @@ export function App() {
         roomTempCelsius: Math.max(7, prev.roomTempCelsius - 3.5),
       }))
     },
-    [vineSegments, pomodoro.enabled, pomodoro.phase, recordViolationInCurrentSession]
+    [leaves, vineSegments, pomodoro.enabled, pomodoro.phase, recordViolationInCurrentSession]
   )
 
   // Listen to Chrome Extension events (compatible with both v1.0 and v1.3 of the extension!) + Vite WS bridge
@@ -436,9 +437,9 @@ export function App() {
     let lastHandledBlockCount = 0
 
     const handleBlockedTabEvent = (reason?: string) => {
-      if (Date.now() - lastDistractionMsRef.current < 800) return
+      if (Date.now() - lastDistractionMsRef.current < 250) return
       triggerDistraction(
-        reason || 'Blocked opening a standalone New Tab (+ / Cmd+T)',
+        reason || 'Blocked opening a standalone New Tab / Window (+ / Cmd+T / Cmd+N)',
         'blocked_new_tab'
       )
     }
@@ -592,8 +593,11 @@ export function App() {
         (e.key === 't' || e.key === 'T' || e.key === 'n' || e.key === 'N')
       ) {
         e.preventDefault()
+        const isNewWin = e.key === 'n' || e.key === 'N'
         triggerDistraction(
-          'Pressed Cmd+T to open a standalone New Tab (only links from existing tabs allowed)',
+          isNewWin
+            ? 'Blocked opening a New Browser Window (Cmd+N)!'
+            : 'Blocked opening a standalone New Tab (Cmd+T)!',
           'blocked_new_tab'
         )
       }
